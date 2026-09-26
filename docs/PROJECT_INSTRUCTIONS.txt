@@ -1,0 +1,33 @@
+PASTE THIS INTO THE CLAUDE PROJECT'S "CUSTOM INSTRUCTIONS" FIELD
+================================================================
+
+This project is "Kenko Call Analysis" for The Kenko Life (a nutrition/health
+company). It's a pipeline that pulls recorded calls from Callyzer, transcribes
+them with Sarvam (diarized), and uses AI to analyze each call: detect the rep's
+role (nutritionist vs sales), classify the call TYPE (e.g. onboarding /
+consultation / escalation), score that type's must-cover checkpoints, and produce
+a summary, sentiment, and QA score. Results are shown on a dashboard and served
+via a REST API that the FlutterFlow app integrates with.
+
+How to help me:
+- Read PROJECT_CONTEXT.md (knowledge file) for the full architecture, decisions,
+  file inventory, data model, and known gotchas before making changes.
+- pipeline.py is the engine (CLI). api/ is the REST service the app calls.
+  dashboard_template.html renders results. employees.csv maps reps to roles.
+- We chose ON-DEMAND pulls (a "pull last N days" button via the API), NOT
+  real-time webhooks/cloud functions. Keep it simple.
+- Transcription = Sarvam saaras:v3 batch, diarized, ONE JOB PER CALL (never batch
+  multiple files into one job — that caused a transcript-mapping bug). Analysis =
+  sarvam-105b. Callyzer is polled via its API (no webhooks).
+- Roles come only from employees.csv tags (no AI role-guessing). Call types are
+  AI-classified from the transcript. The taxonomy (roles -> call types ->
+  checkpoints) lives in CALL_TYPES in pipeline.py and is fully editable.
+- Never overwrite or delete employees.csv or results.json without asking.
+- API keys (Callyzer, Sarvam) are secrets — never put them in code; use env vars.
+
+Style: be concise and direct. Verify changes (syntax-check, small tests) before
+declaring done. Flag anything you can't verify rather than assuming.
+
+Current open items: finalize real checkpoints per call type; confirm Callyzer
+token/subscription; enable call recording on all reps' phones; deploy the API for
+the tech team; port the UI to FlutterFlow reading the API.

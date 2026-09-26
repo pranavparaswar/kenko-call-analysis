@@ -1,0 +1,19 @@
+.env
+.DS_Store
+__pycache__/
+*.pyc
+
+# generated data (regenerated on each run; contains customer call PII)
+audio/
+results.json
+results.csv
+results_backup*.json
+transcripts_cache.json
+dashboard.html
+sales_nightly_dashboard.html
+sales_nightly_summary.pdf
+kenko_call_results.xlsx
+consultation_calls_review.html
+consultation_notes_mapping.csv
+nutrition_consultations_30d.csv
+sample_results.json
