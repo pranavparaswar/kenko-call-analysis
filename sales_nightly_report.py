@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
-"""Nightly sales-team report: filters pipeline.py's results.json down to a
-fixed rep list, builds a scoped interactive dashboard (transcript + checklist
-per call, no audio) and a PDF coverage summary for email.
+"""Nightly sales-team report: filters pipeline.py's results.json down to
+whichever reps are tagged role=sales in employees.csv (so a new hire is
+picked up automatically, no code change needed), and sends EACH rep their
+OWN separate email -- only their own calls, never a teammate's -- with
+management CC'd on every one. Each email carries a PDF coverage summary and
+a scoped interactive dashboard (transcript + checklist per call, no audio).
 
 Run:
-  python3 sales_nightly_report.py --days 1
+  python3 sales_nightly_report.py --days 1 --send
       -> refreshes results.json via pipeline.run(1) (bills Sarvam for any new
-         recordings), then filters + builds outputs.
+         recordings), filters + builds outputs, and emails each rep.
   python3 sales_nightly_report.py --no-refresh
-      -> skips the pipeline run, just rebuilds from the existing results.json.
+      -> skips the pipeline run and the send; just rebuilds from the existing
+         results.json, for local testing.
 """
 import argparse
+import csv
 import datetime as dt
 import json
+import os
+import smtplib
+import traceback
+from email.message import EmailMessage
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -22,29 +31,55 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 
 OUT_DIR = Path(__file__).parent
+EMPLOYEES_CSV = OUT_DIR / "employees.csv"
 
-# Callyzer's emp_name is often just a first name and doesn't match
-# employees.csv's fuller display name -- match on lowercase prefix instead.
-TARGET_REPS = {
-    "sadaf": "sadaf",
-    "nida": "Nida Masood",
-    "sophiya": "Sophiya Dash",
-}
-
-
-def _canon(rep_raw):
-    key = (rep_raw or "").strip().lower()
-    for alias, canon in TARGET_REPS.items():
-        if key == alias or key.startswith(alias):
-            return canon
-    return None
+# Management: CC'd on every rep's individual email.
+CC_LIST = [
+    "pranav@thekenkolife.com",
+    "parimala@thekenkolife.com",
+    "vivek@thekenkolife.com",
+    "neeraj@thekenkolife.com",
+]
+FAILURE_RECIPIENT = "pranav@thekenkolife.com"
 
 
-def load_filtered(results_path):
+def load_sales_reps():
+    """Read employees.csv -> list of sales reps: {name, alias, email}.
+    `alias` is the lowercase first word of emp_name, since Callyzer's
+    emp_name on each call is often just a first name (e.g. "Sophiya"),
+    not employees.csv's fuller display name ("Sophiya Dash")."""
+    reps = []
+    if not EMPLOYEES_CSV.exists():
+        return reps
+    with open(EMPLOYEES_CSV, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            role = (row.get("role") or "").strip().lower()
+            name = (row.get("emp_name") or "").strip()
+            if role != "sales" or not name:
+                continue
+            reps.append({
+                "name": name.title(),
+                "alias": name.split()[0].lower(),
+                "email": (row.get("email") or "").strip(),
+            })
+    return reps
+
+
+def _canon_builder(sales_reps):
+    def _canon(rep_raw):
+        key = (rep_raw or "").strip().lower()
+        for rep in sales_reps:
+            if key == rep["alias"] or key.startswith(rep["alias"]):
+                return rep["name"]
+        return None
+    return _canon
+
+
+def load_filtered(results_path, canon_fn):
     payload = json.loads(Path(results_path).read_text())
     filtered = []
     for c in payload.get("calls", []):
-        canon = _canon(c.get("rep"))
+        canon = canon_fn(c.get("rep"))
         if canon:
             c = dict(c)
             c["rep"] = canon
@@ -88,12 +123,12 @@ def build_dashboard(payload, out_path):
     print(f"Wrote {out_path}")
 
 
-def build_pdf(stats, payload, out_path, dashboard_url=None):
+def build_pdf(stats, payload, out_path, title):
     doc = SimpleDocTemplate(str(out_path), pagesize=letter,
                              topMargin=0.6 * inch, bottomMargin=0.6 * inch)
     styles = getSampleStyleSheet()
     story = [
-        Paragraph("Kenko Sales Team — Nightly Call Coverage", styles["Title"]),
+        Paragraph(title, styles["Title"]),
         Paragraph(
             f"Generated: {payload.get('generated_at', dt.datetime.now().isoformat(timespec='seconds'))}"
             f"  ·  Period: last {payload.get('period_days', '?')} day(s)",
@@ -140,13 +175,73 @@ def build_pdf(stats, payload, out_path, dashboard_url=None):
             story.append(Paragraph(f"• {f}", styles["Normal"]))
         story.append(Spacer(1, 12))
 
-    if dashboard_url:
-        story.append(Paragraph("Click-through dashboard (per-call transcript + checklist detail):",
-                                styles["Heading2"]))
-        story.append(Paragraph(dashboard_url, styles["Normal"]))
-
     doc.build(story)
     print(f"Wrote {out_path}")
+
+
+def _smtp_send(msg):
+    user = os.environ.get("SMTP_USER")
+    pw = os.environ.get("SMTP_APP_PASSWORD")
+    if not user or not pw:
+        raise RuntimeError("SMTP_USER / SMTP_APP_PASSWORD not set in environment")
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        s.login(user, pw)
+        s.send_message(msg)
+
+
+def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path):
+    msg = EmailMessage()
+    today = dt.date.today().isoformat()
+    msg["Subject"] = f"{rep_name} — Call Coverage — {today}"
+    msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
+    msg["To"] = rep_email
+    msg["Cc"] = ", ".join(CC_LIST)
+
+    s = single_stats[rep_name]
+    avg = f"{s['avg_qa']}" if s["avg_qa"] is not None else "n/a"
+    lines = [
+        f"Hi {rep_name.split()[0]},", "",
+        f"Your call coverage for {today}:",
+        f"- {s['recorded']}/{s['total']} calls recorded ({s['rec_pct']}%)",
+        f"- Avg QA score: {avg}",
+        "",
+        "Open the attached dashboard.html in a browser to click into any call "
+        "and see its transcript + checklist (which items were hit/missed).",
+    ]
+    if s["total"] and s["recorded"] == 0:
+        lines.insert(2, "NOTE: 0% recording coverage today — check call recording "
+                         "is enabled on your phone in the Callyzer app.")
+    msg.set_content("\n".join(lines))
+
+    msg.add_attachment(Path(pdf_path).read_bytes(), maintype="application",
+                        subtype="pdf", filename=Path(pdf_path).name)
+    msg.add_attachment(Path(dashboard_path).read_bytes(), maintype="text",
+                        subtype="html", filename=Path(dashboard_path).name)
+    _smtp_send(msg)
+    print(f"Report email sent to {rep_email} (cc: {', '.join(CC_LIST)}).")
+
+
+def send_failure_email(error_text):
+    msg = EmailMessage()
+    msg["Subject"] = f"Kenko Sales Call Coverage FAILED — {dt.date.today().isoformat()}"
+    msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
+    msg["To"] = FAILURE_RECIPIENT
+    msg.set_content(
+        "Tonight's sales call-QA report did not run. No report was sent to anyone.\n\n"
+        f"Error:\n{error_text}"
+    )
+    _smtp_send(msg)
+    print(f"Failure email sent to {FAILURE_RECIPIENT}.")
+
+
+def send_warning_email(warning_text):
+    msg = EmailMessage()
+    msg["Subject"] = f"Kenko Sales Call Coverage — action needed — {dt.date.today().isoformat()}"
+    msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
+    msg["To"] = FAILURE_RECIPIENT
+    msg.set_content(warning_text)
+    _smtp_send(msg)
+    print(f"Warning email sent to {FAILURE_RECIPIENT}.")
 
 
 def main():
@@ -155,24 +250,76 @@ def main():
                      help="days of Callyzer history to refresh via pipeline.run() before filtering")
     ap.add_argument("--no-refresh", action="store_true",
                      help="skip pipeline.run(), just rebuild from the existing results.json")
-    ap.add_argument("--dashboard-url", default="",
-                     help="stable hosted dashboard URL to print in the PDF")
+    ap.add_argument("--send", action="store_true",
+                     help="email each rep their own report on success")
     args = ap.parse_args()
 
-    if not args.no_refresh:
-        import pipeline
-        pipeline.run(args.days)
+    try:
+        if not args.no_refresh:
+            import pipeline
+            pipeline.run(args.days)
 
-    payload = load_filtered(OUT_DIR / "results.json")
-    stats = summarize(payload)
+        sales_reps = load_sales_reps()
+        if not sales_reps:
+            raise RuntimeError("No employees.csv rows tagged role=sales — nothing to report.")
 
-    build_dashboard(payload, OUT_DIR / "sales_nightly_dashboard.html")
-    build_pdf(stats, payload, OUT_DIR / "sales_nightly_summary.pdf",
-              dashboard_url=args.dashboard_url or None)
+        canon_fn = _canon_builder(sales_reps)
+        payload = load_filtered(OUT_DIR / "results.json", canon_fn)
+        stats = summarize(payload)
 
-    print(f"\nFiltered calls: {len(payload['calls'])}")
-    for rep, s in stats.items():
-        print(f"  {rep}: {s['recorded']}/{s['total']} recorded ({s['rec_pct']}%), avg QA {s['avg_qa']}")
+        print(f"\nFiltered calls: {len(payload['calls'])}")
+        for rep, s in stats.items():
+            print(f"  {rep}: {s['recorded']}/{s['total']} recorded ({s['rec_pct']}%), avg QA {s['avg_qa']}")
+    except Exception:
+        err = traceback.format_exc()
+        print(err)
+        if args.send:
+            send_failure_email(err)
+        raise
+
+    reps_with_calls = [s for s in stats.values() if s["total"] > 0]
+    systemic_failure = (reps_with_calls
+                         and all(s["recorded"] == 0 for s in reps_with_calls))
+    if systemic_failure:
+        detail = "\n".join(f"{rep}: {s['recorded']}/{s['total']} recorded"
+                            for rep, s in stats.items())
+        err = ("Every rep shows 0% recording coverage — this looks like a systemic "
+               "transcription/download failure, not a normal quiet night. Refusing "
+               f"to send the misleading report to anyone.\n\n{detail}")
+        print(err)
+        if args.send:
+            send_failure_email(err)
+        return
+
+    missing_email = []
+    for rep in sales_reps:
+        name = rep["name"]
+        if name not in stats or stats[name]["total"] == 0:
+            continue  # no calls this period -- nothing to send
+        if not rep["email"]:
+            missing_email.append(name)
+            continue
+
+        rep_calls = [c for c in payload["calls"] if c["rep"] == name]
+        rep_payload = dict(payload)
+        rep_payload["calls"] = rep_calls
+        alias = rep["alias"]
+        pdf_path = OUT_DIR / f"sales_nightly_{alias}_summary.pdf"
+        dashboard_path = OUT_DIR / f"sales_nightly_{alias}_dashboard.html"
+
+        build_dashboard(rep_payload, dashboard_path)
+        build_pdf({name: stats[name]}, rep_payload, pdf_path,
+                  title=f"{name} — Call Coverage")
+
+        if args.send:
+            send_rep_email(name, rep["email"], stats, pdf_path, dashboard_path)
+
+    if missing_email and args.send:
+        send_warning_email(
+            "These sales reps had calls tonight but no `email` set in employees.csv, "
+            "so they did NOT get their own report (add their email to the `email` "
+            "column to fix):\n\n" + "\n".join(f"- {n}" for n in missing_email)
+        )
 
 
 if __name__ == "__main__":

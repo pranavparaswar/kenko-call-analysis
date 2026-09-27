@@ -12,6 +12,9 @@ transcripts_cache.json
 dashboard.html
 sales_nightly_dashboard.html
 sales_nightly_summary.pdf
+sales_nightly_*_dashboard.html
+sales_nightly_*_summary.pdf
+nightly_cron.log
 kenko_call_results.xlsx
 consultation_calls_review.html
 consultation_notes_mapping.csv
