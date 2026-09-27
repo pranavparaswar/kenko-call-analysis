@@ -189,7 +189,7 @@ def _smtp_send(msg):
         s.send_message(msg)
 
 
-def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path):
+def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, cloud=False):
     msg = EmailMessage()
     today = dt.date.today().isoformat()
     msg["Subject"] = f"{rep_name} — Call Coverage — {today}"
@@ -211,6 +211,8 @@ def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path):
     if s["total"] and s["recorded"] == 0:
         lines.insert(2, "NOTE: 0% recording coverage today — check call recording "
                          "is enabled on your phone in the Callyzer app.")
+    if cloud:
+        lines += ["", "— Ran via cloud routine"]
     msg.set_content("\n".join(lines))
 
     msg.add_attachment(Path(pdf_path).read_bytes(), maintype="application",
@@ -221,25 +223,29 @@ def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path):
     print(f"Report email sent to {rep_email} (cc: {', '.join(CC_LIST)}).")
 
 
-def send_failure_email(error_text):
+def send_failure_email(error_text, cloud=False):
     msg = EmailMessage()
     msg["Subject"] = f"Kenko Sales Call Coverage FAILED — {dt.date.today().isoformat()}"
     msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
     msg["To"] = FAILURE_RECIPIENT
-    msg.set_content(
-        "Tonight's sales call-QA report did not run. No report was sent to anyone.\n\n"
-        f"Error:\n{error_text}"
-    )
+    body = ("Tonight's sales call-QA report did not run. No report was sent to anyone.\n\n"
+            f"Error:\n{error_text}")
+    if cloud:
+        body += "\n\n— Ran via cloud routine"
+    msg.set_content(body)
     _smtp_send(msg)
     print(f"Failure email sent to {FAILURE_RECIPIENT}.")
 
 
-def send_warning_email(warning_text):
+def send_warning_email(warning_text, cloud=False):
     msg = EmailMessage()
     msg["Subject"] = f"Kenko Sales Call Coverage — action needed — {dt.date.today().isoformat()}"
     msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
     msg["To"] = FAILURE_RECIPIENT
-    msg.set_content(warning_text)
+    body = warning_text
+    if cloud:
+        body += "\n\n— Ran via cloud routine"
+    msg.set_content(body)
     _smtp_send(msg)
     print(f"Warning email sent to {FAILURE_RECIPIENT}.")
 
@@ -252,6 +258,9 @@ def main():
                      help="skip pipeline.run(), just rebuild from the existing results.json")
     ap.add_argument("--send", action="store_true",
                      help="email each rep their own report on success")
+    ap.add_argument("--cloud", action="store_true",
+                     help="mark this run as executed via the cloud routine; "
+                          "appends a footer note to every email sent")
     args = ap.parse_args()
 
     try:
@@ -274,7 +283,7 @@ def main():
         err = traceback.format_exc()
         print(err)
         if args.send:
-            send_failure_email(err)
+            send_failure_email(err, cloud=args.cloud)
         raise
 
     reps_with_calls = [s for s in stats.values() if s["total"] > 0]
@@ -288,7 +297,7 @@ def main():
                f"to send the misleading report to anyone.\n\n{detail}")
         print(err)
         if args.send:
-            send_failure_email(err)
+            send_failure_email(err, cloud=args.cloud)
         return
 
     missing_email = []
@@ -312,13 +321,14 @@ def main():
                   title=f"{name} — Call Coverage")
 
         if args.send:
-            send_rep_email(name, rep["email"], stats, pdf_path, dashboard_path)
+            send_rep_email(name, rep["email"], stats, pdf_path, dashboard_path, cloud=args.cloud)
 
     if missing_email and args.send:
         send_warning_email(
             "These sales reps had calls tonight but no `email` set in employees.csv, "
             "so they did NOT get their own report (add their email to the `email` "
-            "column to fix):\n\n" + "\n".join(f"- {n}" for n in missing_email)
+            "column to fix):\n\n" + "\n".join(f"- {n}" for n in missing_email),
+            cloud=args.cloud,
         )
 
 
