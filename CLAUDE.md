@@ -19,12 +19,17 @@ model's own independent rating is kept alongside as `qa_score_model`.
 
 Note: sales only has two call types today — `enquiry` and `follow_up` (`closing`
 and `escalation` were removed 2026-08-15; the business doesn't have those as
-distinct call types). `sales.enquiry` checkpoints are weighted 1-3, covering the
-full pitch: health goals/conditions, delivery location, macros/calories, ongoing
-nutrition support, cuisine variety, delivery schedule, meal wallet/pause-cancel
-flexibility, food temperature/handling, pricing, and app-link payment. `follow_up`
-checkpoints still have no explicit `weight` set, so they default to 1 (flat/
-unweighted) until redesigned.
+distinct call types). `sales.enquiry` was redesigned 2026-09-28 per Pranav's own
+weightage table — 13 checkpoints, weighted 2-5 (not nutrition's 1-3 scale), total
+possible weight 56: intro (3); core pitch/doorstep delivery, macro & calorie
+counting, nutritionist handholding, menu-doesn't-repeat-for-a-month, multiple
+cuisines, 6-day delivery, pause & carry-forward *with a concrete example*,
+pricing, and freshness/handling (5 each); a discovery question asking what the
+customer's looking for, credited only if the customer states a duration (4);
+delivery address and next-steps-to-close (2 each). The old `health_goal`,
+`veg_nonveg_pref`, and `app_link_payment` checkpoints were dropped, not folded
+in elsewhere — confirmed intentional. `follow_up` is unchanged and still has no
+explicit `weight` set, so it defaults to 1 (flat/unweighted) until redesigned.
 
 Both `enquiry` and `follow_up` share an `app_link_payment` checkpoint: payment
 is via the Kenko app link (not a payment gateway), and reps must send it the

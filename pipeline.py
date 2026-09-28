@@ -170,50 +170,48 @@ CALL_TYPES = {
     },
     "sales": {
         "enquiry": {
-            # Checkpoints and weights below (1-3, same scale as nutrition) cover the
-            # full sales pitch — split into granular, independently-scored items
-            # instead of one bundled "explain the plan" checkpoint.
+            # Redesigned 2026-09-28 per Pranav's new weightage table (weight scale
+            # is now 1-5, total possible weight 56 -- not the old 1-3 scale nutrition
+            # still uses). As with nutrition's consultation checkpoints, order of
+            # coverage is NOT scored -- only whether each point was genuinely
+            # covered somewhere on the call.
             "desc": "First contact with a prospect — discovery / new enquiry.",
             "checkpoints": [
-                {"id": "intro",        "label": "Intro w/ name + Kenko", "weight": 1,
+                {"id": "intro", "label": "Intro", "weight": 3,
                  "criteria": "Introduces themselves by name and mentions The Kenko Life."},
-                {"id": "health_goal",  "label": "Ask health goals & conditions", "weight": 3,
-                 "criteria": "Asks about the customer's health/nutrition goals and any "
-                             "relevant health conditions."},
-                {"id": "delivery_location", "label": "Ask delivery location", "weight": 2,
-                 "criteria": "Asks for and notes the customer's delivery location/address; "
-                             "mentions support for multiple delivery addresses if relevant."},
-                {"id": "macros_calories", "label": "Mention macro & calorie counting", "weight": 2,
+                {"id": "healthy_food_doorstep", "label": "Healthy food to your doorstep", "weight": 5,
+                 "criteria": "States the core pitch — healthy food delivered to the "
+                             "customer's doorstep."},
+                {"id": "macros_calories", "label": "Macro & calorie counted meals", "weight": 5,
                  "criteria": "Mentions that meals are macro- and calorie-counted."},
-                {"id": "nutrition_support", "label": "Nutrition support throughout journey", "weight": 2,
-                 "criteria": "Talks about ongoing nutrition/coach support being available "
-                             "throughout the customer's journey, not just at signup."},
-                {"id": "cuisine_variety", "label": "Varied cuisines / menu rotation", "weight": 2,
-                 "criteria": "Talks about the variety of meals and cuisines on offer, and "
-                             "mentions the menu doesn't repeat for 4 weeks if relevant."},
-                {"id": "delivery_schedule", "label": "Delivery schedule", "weight": 2,
-                 "criteria": "Explains that delivery happens 6 days a week, within a "
-                             "delivery window."},
-                {"id": "meal_wallet_flexibility", "label": "Meal wallet / pause & cancel flexibility", "weight": 3,
-                 "criteria": "Explains that 1 month = 26 meals which can be used flexibly "
-                             "over any period, with the ability to pause or cancel deliveries."},
-                {"id": "food_temp_handling", "label": "Food temperature & handling", "weight": 3,
-                 "criteria": "Explains that food is delivered cold/refrigerated and must be "
-                             "refrigerated and reheated before eating."},
-                {"id": "veg_nonveg_pref", "label": "Ask veg/non-veg preference", "weight": 1,
-                 "criteria": "Asks and notes whether the customer prefers veg or non-veg meals."},
-                {"id": "price",        "label": "State price/offer clearly", "weight": 3,
+                {"id": "nutritionist_handholding", "label": "Nutritionist handholds you through the journey", "weight": 5,
+                 "criteria": "Explains that a nutritionist/coach handholds the customer "
+                             "through their journey, not just at signup."},
+                {"id": "menu_no_repeat_month", "label": "Menu doesn't repeat for a month", "weight": 5,
+                 "criteria": "States that the menu doesn't repeat for a month."},
+                {"id": "multiple_cuisines", "label": "Multiple cuisines", "weight": 5,
+                 "criteria": "Mentions the variety of cuisines on offer."},
+                {"id": "delivery_6_days", "label": "6 days a week delivery", "weight": 5,
+                 "criteria": "Explains that delivery happens 6 days a week."},
+                {"id": "pause_carry_forward_example", "label": "Pause & carry-forward flexibility, with example", "weight": 5,
+                 "criteria": "Explains the pause/carry-forward flexibility AND gives a "
+                             "concrete example (e.g. if travelling, pause the next 3 days' "
+                             "meals by 6 PM the previous day). Explaining the flexibility "
+                             "without a concrete example does not count as a hit."},
+                {"id": "discovery_duration", "label": "Discovery question: what are you looking for?", "weight": 4,
+                 "criteria": "Asks a discovery question along the lines of \"may I know what "
+                             "exactly you're looking for?\" AND the customer responds with a "
+                             "duration. If the rep asks but the customer never states a "
+                             "duration, this does not count as a hit."},
+                {"id": "pricing", "label": "Pricing", "weight": 5,
                  "criteria": "States the price and any current offer clearly."},
-                {"id": "app_link_payment", "label": "Send app link if customer is ready to buy", "weight": 3,
-                 "criteria": "If at any point on the call the customer says they're convinced "
-                             "and asks how to proceed, mentions/sends the Kenko app link and "
-                             "directs them to download the app to complete payment there "
-                             "(payment is via app link, not a payment gateway). Not applicable "
-                             "if the customer never indicated readiness to proceed on this "
-                             "call, or for trial plans / plans outside the standard "
-                             "1/2/3-month options — for those, explains next steps instead."},
-                {"id": "next_step",    "label": "Set next step", "weight": 1,
-                 "criteria": "Sets a clear next step or follow-up."},
+                {"id": "freshness", "label": "Freshness", "weight": 5,
+                 "criteria": "Explains that meals arrive refrigerated/below room temperature "
+                             "and just need to be refrigerated/microwaved before eating."},
+                {"id": "delivery_address", "label": "Delivery address taken", "weight": 2,
+                 "criteria": "Asks for and notes the customer's delivery address."},
+                {"id": "next_steps_close", "label": "Next steps to close", "weight": 2,
+                 "criteria": "Sets clear next steps to close the sale."},
             ],
         },
         "follow_up": {
