@@ -9,10 +9,20 @@ a scoped interactive dashboard (transcript + checklist per call, no audio).
 Run:
   python3 sales_nightly_report.py --days 1 --send
       -> refreshes results.json via pipeline.run(1) (bills Sarvam for any new
-         recordings), filters + builds outputs, and emails each rep.
+         recordings), filters + builds outputs, and emails each rep via raw
+         SMTP (smtplib). Local machines only -- see --cloud below.
   python3 sales_nightly_report.py --no-refresh
       -> skips the pipeline run and the send; just rebuilds from the existing
          results.json, for local testing.
+
+--cloud: the cloud sandbox this runs in as a scheduled routine only permits
+  outbound HTTPS (via its proxy), not raw SMTP sockets -- smtplib.SMTP_SSL
+  fails there with OSError: [Errno 97] Address family not supported by
+  protocol. So with --cloud, no email is ever sent directly: instead, each
+  email's content is printed as a `CLOUD_EMAIL_JSON: {...}` line on stdout,
+  and the calling agent (which has the Gmail MCP tool, itself HTTPS-based)
+  is responsible for actually sending each one. Without --cloud, emails are
+  sent for real via smtplib, unchanged from before.
 """
 import argparse
 import csv
@@ -189,13 +199,16 @@ def _smtp_send(msg):
         s.send_message(msg)
 
 
+def _emit_cloud_email(payload):
+    """Cloud sandboxes here can't open raw SMTP sockets (only HTTPS via their
+    proxy), so instead of sending, print the email as one JSON line for the
+    calling agent to dispatch via its (HTTPS-based) Gmail tool."""
+    print("CLOUD_EMAIL_JSON:" + json.dumps(payload, ensure_ascii=False))
+
+
 def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, cloud=False):
-    msg = EmailMessage()
     today = dt.date.today().isoformat()
-    msg["Subject"] = f"{rep_name} — Call Coverage — {today}"
-    msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
-    msg["To"] = rep_email
-    msg["Cc"] = ", ".join(CC_LIST)
+    subject = f"{rep_name} — Call Coverage — {today}"
 
     s = single_stats[rep_name]
     avg = f"{s['avg_qa']}" if s["avg_qa"] is not None else "n/a"
@@ -213,8 +226,32 @@ def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, 
                          "is enabled on your phone in the Callyzer app.")
     if cloud:
         lines += ["", "— Ran via cloud routine"]
-    msg.set_content("\n".join(lines))
+    body = "\n".join(lines)
 
+    if cloud:
+        _emit_cloud_email({
+            "kind": "rep_report",
+            "to": rep_email,
+            "cc": CC_LIST,
+            "subject": subject,
+            "body": body,
+            "attachments": [
+                {"path": str(pdf_path), "filename": Path(pdf_path).name,
+                 "mime_type": "application/pdf"},
+                {"path": str(dashboard_path), "filename": Path(dashboard_path).name,
+                 "mime_type": "text/html"},
+            ],
+        })
+        print(f"[cloud] Queued report email for {rep_email} (cc: {', '.join(CC_LIST)}) "
+              f"-- agent must send it via the Gmail tool using the CLOUD_EMAIL_JSON line above.")
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
+    msg["To"] = rep_email
+    msg["Cc"] = ", ".join(CC_LIST)
+    msg.set_content(body)
     msg.add_attachment(Path(pdf_path).read_bytes(), maintype="application",
                         subtype="pdf", filename=Path(pdf_path).name)
     msg.add_attachment(Path(dashboard_path).read_bytes(), maintype="text",
@@ -224,27 +261,41 @@ def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, 
 
 
 def send_failure_email(error_text, cloud=False):
-    msg = EmailMessage()
-    msg["Subject"] = f"Kenko Sales Call Coverage FAILED — {dt.date.today().isoformat()}"
-    msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
-    msg["To"] = FAILURE_RECIPIENT
+    subject = f"Kenko Sales Call Coverage FAILED — {dt.date.today().isoformat()}"
     body = ("Tonight's sales call-QA report did not run. No report was sent to anyone.\n\n"
             f"Error:\n{error_text}")
     if cloud:
         body += "\n\n— Ran via cloud routine"
+        _emit_cloud_email({"kind": "failure", "to": FAILURE_RECIPIENT,
+                            "subject": subject, "body": body})
+        print(f"[cloud] Queued failure email for {FAILURE_RECIPIENT} "
+              f"-- agent must send it via the Gmail tool using the CLOUD_EMAIL_JSON line above.")
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
+    msg["To"] = FAILURE_RECIPIENT
     msg.set_content(body)
     _smtp_send(msg)
     print(f"Failure email sent to {FAILURE_RECIPIENT}.")
 
 
 def send_warning_email(warning_text, cloud=False):
-    msg = EmailMessage()
-    msg["Subject"] = f"Kenko Sales Call Coverage — action needed — {dt.date.today().isoformat()}"
-    msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
-    msg["To"] = FAILURE_RECIPIENT
+    subject = f"Kenko Sales Call Coverage — action needed — {dt.date.today().isoformat()}"
     body = warning_text
     if cloud:
         body += "\n\n— Ran via cloud routine"
+        _emit_cloud_email({"kind": "warning", "to": FAILURE_RECIPIENT,
+                            "subject": subject, "body": body})
+        print(f"[cloud] Queued warning email for {FAILURE_RECIPIENT} "
+              f"-- agent must send it via the Gmail tool using the CLOUD_EMAIL_JSON line above.")
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
+    msg["To"] = FAILURE_RECIPIENT
     msg.set_content(body)
     _smtp_send(msg)
     print(f"Warning email sent to {FAILURE_RECIPIENT}.")
@@ -259,8 +310,10 @@ def main():
     ap.add_argument("--send", action="store_true",
                      help="email each rep their own report on success")
     ap.add_argument("--cloud", action="store_true",
-                     help="mark this run as executed via the cloud routine; "
-                          "appends a footer note to every email sent")
+                     help="running in the cloud sandbox: never send via raw SMTP "
+                          "(it can't open one there); instead print each email as "
+                          "a CLOUD_EMAIL_JSON line for the calling agent to send "
+                          "via its Gmail tool, with a footer note added")
     args = ap.parse_args()
 
     try:
