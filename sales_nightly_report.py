@@ -397,6 +397,11 @@ def main():
                           "instead of their real employees.csv email, and drop CC_LIST "
                           "entirely -- so a test run never emails real reps/managers or "
                           "grants them Drive access to test output.")
+    ap.add_argument("--max-calls", type=int, default=None,
+                     help="TESTING ONLY: after filtering to sales reps, keep only "
+                          "the first N calls (across all reps) before building or "
+                          "sending anything -- combine with --no-refresh for a fast, "
+                          "zero-Sarvam-cost end-to-end test of the email/Drive flow.")
     args = ap.parse_args()
 
     try:
@@ -410,6 +415,9 @@ def main():
 
         canon_fn = _canon_builder(sales_reps)
         payload = load_filtered(OUT_DIR / "results.json", canon_fn)
+        if args.max_calls is not None:
+            payload = dict(payload)
+            payload["calls"] = payload["calls"][:args.max_calls]
         stats = summarize(payload)
 
         print(f"\nFiltered calls: {len(payload['calls'])}")
