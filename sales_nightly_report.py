@@ -23,6 +23,15 @@ Run:
   and the calling agent (which has the Gmail MCP tool, itself HTTPS-based)
   is responsible for actually sending each one. Without --cloud, emails are
   sent for real via smtplib, unchanged from before.
+
+  The dashboard HTML (150-330KB) is never put in a CLOUD_EMAIL_JSON
+  attachment -- past runs proved the calling agent can't reliably retype
+  that much content into a single tool-call parameter (it silently
+  truncates). Instead, in --cloud mode this script uploads each rep's
+  dashboard.html straight to Google Drive itself (GDRIVE_SERVICE_ACCOUNT_JSON
+  + GDRIVE_SHARED_DRIVE_ID), shares it with just that rep + CC_LIST, and
+  puts the resulting link in the email body. Only the small PDF (~2-3KB)
+  still goes through as a real attachment.
 """
 import argparse
 import csv
@@ -206,21 +215,85 @@ def _emit_cloud_email(payload):
     print("CLOUD_EMAIL_JSON:" + json.dumps(payload, ensure_ascii=False))
 
 
+def _gdrive_service():
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+
+    creds_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")
+    if not creds_json:
+        raise RuntimeError("GDRIVE_SERVICE_ACCOUNT_JSON not set in environment")
+    info = json.loads(creds_json)
+    creds = service_account.Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/drive"])
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def upload_dashboard_to_drive(local_path, filename, rep_email):
+    """Upload a dashboard HTML file to the Kenko Sales Reports Shared Drive
+    and share it with just that rep + CC_LIST (never "anyone with the link"
+    -- these contain real customer call transcripts). Uploading via the
+    Drive API directly means the file goes from disk to Google over HTTPS
+    in this one process; no giant blob ever has to pass through an LLM
+    tool-call parameter. Returns the file's webViewLink."""
+    from googleapiclient.http import MediaFileUpload
+
+    drive_id = os.environ.get("GDRIVE_SHARED_DRIVE_ID")
+    if not drive_id:
+        raise RuntimeError("GDRIVE_SHARED_DRIVE_ID not set in environment")
+
+    service = _gdrive_service()
+    media = MediaFileUpload(str(local_path), mimetype="text/html", resumable=False)
+    file = service.files().create(
+        body={"name": filename, "parents": [drive_id]},
+        media_body=media,
+        fields="id, webViewLink",
+        supportsAllDrives=True,
+    ).execute()
+    file_id = file["id"]
+
+    for email in [rep_email] + CC_LIST:
+        if not email:
+            continue
+        service.permissions().create(
+            fileId=file_id,
+            body={"type": "user", "role": "reader", "emailAddress": email},
+            sendNotificationEmail=False,
+            supportsAllDrives=True,
+        ).execute()
+
+    return file.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
+
+
 def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, cloud=False):
     today = dt.date.today().isoformat()
     subject = f"{rep_name} — Call Coverage — {today}"
 
     s = single_stats[rep_name]
     avg = f"{s['avg_qa']}" if s["avg_qa"] is not None else "n/a"
+
+    dashboard_link = None
+    if cloud:
+        dashboard_link = upload_dashboard_to_drive(
+            dashboard_path, f"{rep_name} — Call Coverage — {today}.html", rep_email)
+
     lines = [
         f"Hi {rep_name.split()[0]},", "",
         f"Your call coverage for {today}:",
         f"- {s['recorded']}/{s['total']} calls recorded ({s['rec_pct']}%)",
         f"- Avg QA score: {avg}",
         "",
-        "Open the attached dashboard.html in a browser to click into any call "
-        "and see its transcript + checklist (which items were hit/missed).",
     ]
+    if cloud:
+        lines += [
+            f"Full interactive dashboard (click into any call for its transcript + "
+            f"checklist): {dashboard_link}",
+            "(Shared directly with you on Drive — sign in with your @thekenkolife.com "
+            "account to view.)",
+        ]
+    else:
+        lines.append(
+            "Open the attached dashboard.html in a browser to click into any call "
+            "and see its transcript + checklist (which items were hit/missed).")
     if s["total"] and s["recorded"] == 0:
         lines.insert(2, "NOTE: 0% recording coverage today — check call recording "
                          "is enabled on your phone in the Callyzer app.")
@@ -238,12 +311,11 @@ def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, 
             "attachments": [
                 {"path": str(pdf_path), "filename": Path(pdf_path).name,
                  "mime_type": "application/pdf"},
-                {"path": str(dashboard_path), "filename": Path(dashboard_path).name,
-                 "mime_type": "text/html"},
             ],
         })
         print(f"[cloud] Queued report email for {rep_email} (cc: {', '.join(CC_LIST)}) "
-              f"-- agent must send it via the Gmail tool using the CLOUD_EMAIL_JSON line above.")
+              f"-- agent must send it via the Gmail tool using the CLOUD_EMAIL_JSON line above. "
+              f"Dashboard uploaded to Drive: {dashboard_link}")
         return
 
     msg = EmailMessage()

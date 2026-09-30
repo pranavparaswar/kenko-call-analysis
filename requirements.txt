@@ -2,3 +2,5 @@ fastapi>=0.110
 uvicorn>=0.29
 requests>=2.31
 sarvamai>=0.1.0
+google-api-python-client>=2.100
+google-auth>=2.23
