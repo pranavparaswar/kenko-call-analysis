@@ -228,9 +228,9 @@ def _gdrive_service():
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
-def upload_dashboard_to_drive(local_path, filename, rep_email):
+def upload_dashboard_to_drive(local_path, filename, rep_email, cc_list):
     """Upload a dashboard HTML file to the Kenko Sales Reports Shared Drive
-    and share it with just that rep + CC_LIST (never "anyone with the link"
+    and share it with just that rep + cc_list (never "anyone with the link"
     -- these contain real customer call transcripts). Uploading via the
     Drive API directly means the file goes from disk to Google over HTTPS
     in this one process; no giant blob ever has to pass through an LLM
@@ -251,7 +251,7 @@ def upload_dashboard_to_drive(local_path, filename, rep_email):
     ).execute()
     file_id = file["id"]
 
-    for email in [rep_email] + CC_LIST:
+    for email in [rep_email] + list(cc_list):
         if not email:
             continue
         service.permissions().create(
@@ -264,9 +264,12 @@ def upload_dashboard_to_drive(local_path, filename, rep_email):
     return file.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
 
 
-def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, cloud=False):
+def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, cloud=False, test_mode=False):
     today = dt.date.today().isoformat()
     subject = f"{rep_name} — Call Coverage — {today}"
+    if test_mode:
+        subject = "[TEST] " + subject
+    cc_list = [] if test_mode else CC_LIST
 
     s = single_stats[rep_name]
     avg = f"{s['avg_qa']}" if s["avg_qa"] is not None else "n/a"
@@ -274,7 +277,7 @@ def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, 
     dashboard_link = None
     if cloud:
         dashboard_link = upload_dashboard_to_drive(
-            dashboard_path, f"{rep_name} — Call Coverage — {today}.html", rep_email)
+            dashboard_path, f"{rep_name} — Call Coverage — {today}.html", rep_email, cc_list)
 
     lines = [
         f"Hi {rep_name.split()[0]},", "",
@@ -299,13 +302,15 @@ def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, 
                          "is enabled on your phone in the Callyzer app.")
     if cloud:
         lines += ["", "— Ran via cloud routine"]
+    if test_mode:
+        lines += ["", "*** TEST RUN -- redirected from the real rep/CC recipients, not a real report ***"]
     body = "\n".join(lines)
 
     if cloud:
         _emit_cloud_email({
             "kind": "rep_report",
             "to": rep_email,
-            "cc": CC_LIST,
+            "cc": cc_list,
             "subject": subject,
             "body": body,
             "attachments": [
@@ -313,7 +318,7 @@ def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, 
                  "mime_type": "application/pdf"},
             ],
         })
-        print(f"[cloud] Queued report email for {rep_email} (cc: {', '.join(CC_LIST)}) "
+        print(f"[cloud] Queued report email for {rep_email} (cc: {', '.join(cc_list)}) "
               f"-- agent must send it via the Gmail tool using the CLOUD_EMAIL_JSON line above. "
               f"Dashboard uploaded to Drive: {dashboard_link}")
         return
@@ -322,7 +327,7 @@ def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, 
     msg["Subject"] = subject
     msg["From"] = os.environ.get("SMTP_USER", FAILURE_RECIPIENT)
     msg["To"] = rep_email
-    msg["Cc"] = ", ".join(CC_LIST)
+    msg["Cc"] = ", ".join(cc_list)
     msg.set_content(body)
     msg.add_attachment(Path(pdf_path).read_bytes(), maintype="application",
                         subtype="pdf", filename=Path(pdf_path).name)
@@ -386,6 +391,12 @@ def main():
                           "(it can't open one there); instead print each email as "
                           "a CLOUD_EMAIL_JSON line for the calling agent to send "
                           "via its Gmail tool, with a footer note added")
+    ap.add_argument("--test-recipient", default=None,
+                     help="TESTING ONLY: for every rep, override both the email "
+                          "'to' and the Drive share target to this single address "
+                          "instead of their real employees.csv email, and drop CC_LIST "
+                          "entirely -- so a test run never emails real reps/managers or "
+                          "grants them Drive access to test output.")
     args = ap.parse_args()
 
     try:
@@ -430,7 +441,7 @@ def main():
         name = rep["name"]
         if name not in stats or stats[name]["total"] == 0:
             continue  # no calls this period -- nothing to send
-        if not rep["email"]:
+        if not rep["email"] and not args.test_recipient:
             missing_email.append(name)
             continue
 
@@ -446,7 +457,9 @@ def main():
                   title=f"{name} — Call Coverage")
 
         if args.send:
-            send_rep_email(name, rep["email"], stats, pdf_path, dashboard_path, cloud=args.cloud)
+            send_to = args.test_recipient or rep["email"]
+            send_rep_email(name, send_to, stats, pdf_path, dashboard_path,
+                            cloud=args.cloud, test_mode=bool(args.test_recipient))
 
     if missing_email and args.send:
         send_warning_email(
