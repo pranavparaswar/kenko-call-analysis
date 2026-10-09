@@ -17,6 +17,19 @@ weights for checkpoints the rep hit, divided by the total possible weight for
 that call type. This ties the visible QA number directly to the checklist. The
 model's own independent rating is kept alongside as `qa_score_model`.
 
+For call types flagged `order_weighted: True` in `CALL_TYPES` (currently
+`sales.enquiry` only, since 2026-10-09 per Pranav) the checklist's own list
+order IS the required pitch flow, and `qa_score` is 50% checkpoint coverage +
+50% order adherence: how closely the checkpoints the rep *did* cover followed
+that order, scored via longest-increasing-subsequence over each covered
+checkpoint's position in the ideal list (`_order_adherence()`) — covering 8
+checkpoints with 6 of them in correct relative order scores 75 on the order
+half. The model reports which checkpoints came up in which order as
+`checkpoint_order` (an id list, earliest-first) alongside `must_say`; a
+checkpoint never covered can't be "out of order" — it's already penalized via
+coverage. Other call types (nutrition, `sales.follow_up`) have no
+`order_weighted` flag and score coverage only, same as before.
+
 Note: sales only has two call types today — `enquiry` and `follow_up` (`closing`
 and `escalation` were removed 2026-08-15; the business doesn't have those as
 distinct call types). `sales.enquiry` was redesigned 2026-09-28 per Pranav's own
@@ -30,6 +43,12 @@ delivery address and next-steps-to-close (2 each). The old `health_goal`,
 `veg_nonveg_pref`, and `app_link_payment` checkpoints were dropped, not folded
 in elsewhere — confirmed intentional. `follow_up` is unchanged and still has no
 explicit `weight` set, so it defaults to 1 (flat/unweighted) until redesigned.
+
+`sales.enquiry`'s `multiple_cuisines` checkpoint (redefined 2026-10-09) only
+counts as a hit if the rep mentions cuisine variety *specifically in response
+to the customer asking* what kind of menu/food/cuisines Kenko serves —
+mentioning it unprompted no longer counts, same pattern as
+`pause_carry_forward_example` requiring a concrete example.
 
 Both `enquiry` and `follow_up` share an `app_link_payment` checkpoint: payment
 is via the Kenko app link (not a payment gateway), and reps must send it the

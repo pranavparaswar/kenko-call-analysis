@@ -172,9 +172,13 @@ CALL_TYPES = {
         "enquiry": {
             # Redesigned 2026-09-28 per Pranav's new weightage table (weight scale
             # is now 1-5, total possible weight 56 -- not the old 1-3 scale nutrition
-            # still uses). As with nutrition's consultation checkpoints, order of
-            # coverage is NOT scored -- only whether each point was genuinely
-            # covered somewhere on the call.
+            # still uses).
+            # Redesigned again 2026-10-09: unlike nutrition's checkpoints (where
+            # order of coverage is NOT scored), enquiry now scores order too --
+            # order_weighted=True means weighted_score() blends 50% checkpoint
+            # coverage with 50% adherence to the checkpoint order below (the
+            # list order IS the required pitch flow). See weighted_score().
+            "order_weighted": True,
             "desc": "First contact with a prospect — discovery / new enquiry.",
             "checkpoints": [
                 {"id": "intro", "label": "Intro", "weight": 3,
@@ -190,7 +194,11 @@ CALL_TYPES = {
                 {"id": "menu_no_repeat_month", "label": "Menu doesn't repeat for a month", "weight": 5,
                  "criteria": "States that the menu doesn't repeat for a month."},
                 {"id": "multiple_cuisines", "label": "Multiple cuisines", "weight": 5,
-                 "criteria": "Mentions the variety of cuisines on offer."},
+                 "criteria": "Mentions the variety of cuisines on offer, SPECIFICALLY in "
+                             "response to the customer asking what kind of menu/food/"
+                             "cuisines Kenko serves. Mentioning cuisine variety unprompted "
+                             "— without the customer having asked about the menu/food/"
+                             "cuisine type — does not count as a hit."},
                 {"id": "delivery_6_days", "label": "6 days a week delivery", "weight": 5,
                  "criteria": "Explains that delivery happens 6 days a week."},
                 {"id": "pause_carry_forward_example", "label": "Pause & carry-forward flexibility, with example", "weight": 5,
@@ -786,6 +794,10 @@ Return JSON with EXACTLY these keys:
   early_exit_reason is "".
 - "must_say": an object mapping each checkpoint id of the CHOSEN call_type to
   true/false. Only meaningful if early_exit_reason is "".
+- "checkpoint_order": an array of checkpoint ids — ONLY the ids that are true
+  in "must_say" — listed in the order they actually came up on the call
+  (earliest first). E.g. if the rep covered pricing before intro, pricing
+  comes first in this array. Only meaningful if early_exit_reason is "".
 - "metric_values": an object mapping each checkpoint id of the CHOSEN call_type
   to the actual value or detail mentioned on the call, where the checkpoint
   involves one — e.g. an actual weight ("78kg"), a measurement, a price quoted,
@@ -819,8 +831,8 @@ Return ONLY the JSON object."""
     return _parse_json(content, default={
         "call_type": "", "summary": "", "sentiment": "Neutral",
         "sentiment_reason": "", "early_exit_reason": "", "drop_note": "",
-        "qa_score": 0, "qa_notes": "", "must_say": {}, "metric_values": {},
-        "action_items": [], "_analysis_failed": True})
+        "qa_score": 0, "qa_notes": "", "must_say": {}, "checkpoint_order": [],
+        "metric_values": {}, "action_items": [], "_analysis_failed": True})
 
 
 # Calls under MIN_DURATION_SEC still get a recording sometimes (quick connects,
@@ -950,6 +962,7 @@ def reprocess():
             c["sentiment"] = a.get("sentiment", "Neutral")
             c["sentiment_reason"] = ""
             c["must_say"] = {}
+            c["checkpoint_order"] = []
             c["metric_values"] = {}
             c["qa_score"] = None
             c["qa_score_model"] = None
@@ -968,6 +981,7 @@ def reprocess():
             c["sentiment"] = a.get("sentiment", "Neutral")
             c["sentiment_reason"] = ""
             c["must_say"] = {}
+            c["checkpoint_order"] = []
             c["metric_values"] = {}
             c["qa_score"] = None
             c["qa_score_model"] = None
@@ -983,8 +997,10 @@ def reprocess():
             c["sentiment"] = a.get("sentiment", "Neutral")
             c["sentiment_reason"] = a.get("sentiment_reason", "")
             c["must_say"] = a.get("must_say", {})
+            c["checkpoint_order"] = a.get("checkpoint_order", [])
             c["metric_values"] = a.get("metric_values", {})
-            c["qa_score"] = None if failed else weighted_score(role, c["call_type"], c["must_say"])
+            c["qa_score"] = None if failed else weighted_score(
+                role, c["call_type"], c["must_say"], c["checkpoint_order"])
             c["qa_score_model"] = a.get("qa_score", 0)
             c["qa_notes"] = a.get("qa_notes", "")
             c["action_items"] = a.get("action_items", [])
@@ -1105,6 +1121,7 @@ def _row(log, transcript, analysis, role):
         }, role)
     call_type = "" if failed else _valid_type(role, analysis.get("call_type", ""))
     must_say = analysis.get("must_say", {})
+    checkpoint_order = analysis.get("checkpoint_order", [])
     return {
         "call_id": str(log.get("id", "")),
         "role": role,
@@ -1123,10 +1140,11 @@ def _row(log, transcript, analysis, role):
         "sentiment_reason": analysis.get("sentiment_reason", ""),
         # qa_score is DERIVED from weighted checkpoint coverage, so it always
         # matches the checklist. The model's own rating is kept as qa_score_model.
-        "qa_score": None if failed else weighted_score(role, call_type, must_say),
+        "qa_score": None if failed else weighted_score(role, call_type, must_say, checkpoint_order),
         "qa_score_model": analysis.get("qa_score", 0),
         "qa_notes": analysis.get("qa_notes", ""),
         "must_say": must_say,
+        "checkpoint_order": checkpoint_order,
         "metric_values": analysis.get("metric_values", {}),
         "action_items": analysis.get("action_items", []),
         "drop_reason": "", "drop_note": "", "callback_time": "",
@@ -1155,7 +1173,7 @@ def _short_row(log, transcript, analysis, role):
         "sentiment": analysis.get("sentiment", "Neutral"),
         "sentiment_reason": "",
         "qa_score": None, "qa_score_model": None, "qa_notes": "",
-        "must_say": {}, "metric_values": {}, "action_items": [],
+        "must_say": {}, "checkpoint_order": [], "metric_values": {}, "action_items": [],
         "drop_reason": "other" if failed else analysis.get("drop_reason", "other"),
         "drop_note": "" if failed else analysis.get("drop_note", ""),
         "callback_time": "" if failed else analysis.get("callback_time", ""),
@@ -1183,7 +1201,7 @@ def _missed_row(log, role):
         "sentiment": "Neutral",
         "sentiment_reason": "",
         "qa_score": None, "qa_score_model": None, "qa_notes": "",
-        "must_say": {}, "metric_values": {}, "action_items": [],
+        "must_say": {}, "checkpoint_order": [], "metric_values": {}, "action_items": [],
         "drop_reason": "no_answer",
         "drop_note": "No recording — call did not connect.",
         "callback_time": "",
@@ -1198,17 +1216,63 @@ def _valid_type(role, t):
         next(iter(CALL_TYPES.get(role, {})), ""))
 
 
-def weighted_score(role, call_type, must_say):
-    """QA score (0-100) = weighted % of this call type's checkpoints covered.
-    Each checkpoint carries a `weight` (default 1); the score is the share of
-    total possible weight the rep actually earned. This ties the QA number
-    directly to the checklist instead of being a separate model guess."""
-    cps = CALL_TYPES.get(role, {}).get(call_type, {}).get("checkpoints", [])
+def _order_adherence(ideal_ids, checkpoint_order):
+    """0-100: how well `checkpoint_order` (the ids the rep actually covered,
+    in the order they came up) follows `ideal_ids` (the required pitch flow).
+    Scored as the longest run of checkpoints that stayed in the right relative
+    order (longest increasing subsequence of each id's position in
+    `ideal_ids`), as a share of the checkpoints the rep covered at all —
+    e.g. covering 8 checkpoints with 6 of them in correct relative order
+    scores 75. A checkpoint id not in the ideal list (model typo) is ignored;
+    duplicates are collapsed to their first occurrence."""
+    pos = {cid: i for i, cid in enumerate(ideal_ids)}
+    seq, seen = [], set()
+    for cid in checkpoint_order or []:
+        if cid in pos and cid not in seen:
+            seq.append(pos[cid])
+            seen.add(cid)
+    if not seq:
+        return 0
+    # Longest increasing subsequence length (patience-sorting, O(n log n)).
+    tails = []
+    for x in seq:
+        lo, hi = 0, len(tails)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if tails[mid] < x:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo == len(tails):
+            tails.append(x)
+        else:
+            tails[lo] = x
+    return round(100 * len(tails) / len(seq))
+
+
+def weighted_score(role, call_type, must_say, checkpoint_order=None):
+    """QA score (0-100). Each checkpoint carries a `weight` (default 1);
+    coverage_score is the share of total possible weight the rep actually
+    earned — this ties the QA number directly to the checklist instead of
+    being a separate model guess.
+
+    For call types with `order_weighted: True` (currently sales.enquiry
+    only — see CALL_TYPES), the final score blends 50% coverage_score with
+    50% order_score (see `_order_adherence`): how closely the checkpoints
+    that WERE covered followed the checklist's own order, which is the
+    required pitch flow. Call types without the flag (nutrition, follow_up)
+    are unaffected — order is not scored for them."""
+    ctype = CALL_TYPES.get(role, {}).get(call_type, {})
+    cps = ctype.get("checkpoints", [])
     if not cps:
         return 0
     total = sum(c.get("weight", 1) for c in cps)
     got = sum(c.get("weight", 1) for c in cps if (must_say or {}).get(c["id"]))
-    return round(100 * got / total) if total else 0
+    coverage_score = 100 * got / total if total else 0
+    if not ctype.get("order_weighted"):
+        return round(coverage_score)
+    order_score = _order_adherence([c["id"] for c in cps], checkpoint_order)
+    return round(0.5 * coverage_score + 0.5 * order_score)
 
 
 def _fmt_date(v):
