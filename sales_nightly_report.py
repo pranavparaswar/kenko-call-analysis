@@ -460,6 +460,20 @@ def main():
             send_failure_email(err, cloud=args.cloud)
         return
 
+    reps_with_recordings = [s for s in stats.values() if s["recorded"] > 0]
+    analysis_failure = (reps_with_recordings
+                         and all(s["scored"] == 0 for s in reps_with_recordings))
+    if analysis_failure:
+        detail = "\n".join(f"{rep}: {s['scored']}/{s['recorded']} scored"
+                            for rep, s in stats.items())
+        err = ("Every recorded call failed QA analysis (0 scored, likely an invalid "
+               "or misconfigured ANTHROPIC_API_KEY/SARVAM_API_KEY) — refusing to send "
+               f"reports with no QA scores to anyone.\n\n{detail}")
+        print(err)
+        if args.send:
+            send_failure_email(err, cloud=args.cloud)
+        return
+
     missing_email = []
     for rep in sales_reps:
         name = rep["name"]
