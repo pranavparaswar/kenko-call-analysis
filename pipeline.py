@@ -390,7 +390,14 @@ def _call_claude(system, user, schema, max_tokens=8000, effort="high"):
         messages=[{"role": "user", "content": user}],
     )
     text = next(b.text for b in response.content if b.type == "text")
-    return json.loads(text)
+    result = json.loads(text)
+    # must_say/metric_values travel as JSON-encoded strings in Claude's schema
+    # (see _analyze_schema) -- decode back to real dicts so callers see the
+    # same shape regardless of provider.
+    for key in ("must_say", "metric_values"):
+        if isinstance(result.get(key), str):
+            result[key] = json.loads(result[key]) if result[key] else {}
+    return result
 
 
 def _post_sarvam_chat(payload, timeout=120, max_retries=4):
@@ -876,9 +883,14 @@ def _analyze_schema(type_keys, drop_reasons):
             "sentiment_reason": {"type": "string"},
             "early_exit_reason": {"type": "string", "enum": [""] + drop_reasons},
             "drop_note": {"type": "string"},
-            "qa_score": {"type": "integer", "minimum": 0, "maximum": 100},
+            "qa_score": {"type": "integer"},
             "qa_notes": {"type": "string"},
-            "must_say": {"type": "object", "additionalProperties": {"type": "boolean"}},
+            # Claude's structured-output schema requires every object to have
+            # additionalProperties: false (no dynamically-keyed objects), so
+            # these two are a JSON-encoded string on the wire -- _call_claude()
+            # decodes them back into real dicts before returning, so every
+            # caller (both providers) sees a plain dict either way.
+            "must_say": {"type": "string"},
             # Each entry tags whether the customer asked about this checkpoint
             # first (customer_initiated=true) or the rep brought it up on their
             # own -- used by _order_adherence() to exempt "the customer asked,
@@ -896,7 +908,7 @@ def _analyze_schema(type_keys, drop_reasons):
                     "additionalProperties": False,
                 },
             },
-            "metric_values": {"type": "object", "additionalProperties": {"type": "string"}},
+            "metric_values": {"type": "string"},  # also JSON-encoded, see must_say above
             "action_items": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["call_type", "summary", "sentiment", "sentiment_reason",
