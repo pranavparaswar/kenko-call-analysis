@@ -390,14 +390,7 @@ def _call_claude(system, user, schema, max_tokens=8000, effort="high"):
         messages=[{"role": "user", "content": user}],
     )
     text = next(b.text for b in response.content if b.type == "text")
-    result = json.loads(text)
-    # must_say/metric_values travel as JSON-encoded strings in Claude's schema
-    # (see _analyze_schema) -- decode back to real dicts so callers see the
-    # same shape regardless of provider.
-    for key in ("must_say", "metric_values"):
-        if isinstance(result.get(key), str):
-            result[key] = json.loads(result[key]) if result[key] else {}
-    return result
+    return json.loads(text)
 
 
 def _post_sarvam_chat(payload, timeout=120, max_retries=4):
@@ -885,12 +878,39 @@ def _analyze_schema(type_keys, drop_reasons):
             "drop_note": {"type": "string"},
             "qa_score": {"type": "integer"},
             "qa_notes": {"type": "string"},
-            # Claude's structured-output schema requires every object to have
-            # additionalProperties: false (no dynamically-keyed objects), so
-            # these two are a JSON-encoded string on the wire -- _call_claude()
-            # decodes them back into real dicts before returning, so every
-            # caller (both providers) sees a plain dict either way.
-            "must_say": {"type": "string"},
+            # Combined per-checkpoint judgment: whether it was covered AND
+            # what detail was mentioned, decided together in one object so
+            # the two can't drift apart -- previously must_say and
+            # metric_values were separately-generated JSON blobs with no
+            # structural link, so the model could write real evidence into
+            # metric_values for a checkpoint it independently marked false in
+            # must_say (observed live: a rep clearly explained macro/calorie
+            # counting, metric_values captured that detail verbatim, but
+            # must_say still said false, showing "Missed" right next to the
+            # proof it wasn't). This is a fixed-shape ARRAY (not a
+            # dynamically-keyed object -- Claude's schema requires
+            # additionalProperties: false, which can't express "one entry per
+            # checkpoint id" since the id set depends on the call_type the
+            # model just picked) so every field is schema-enforced JSON, same
+            # as checkpoint_order below -- an earlier version used a bare
+            # "type": "string" here relying on the model to hand-produce
+            # valid JSON inside it, which free-tested as unreliable (it often
+            # wrote prose like "intro, pricing hit; freshness missed"
+            # instead of real JSON). analyze() converts this array into the
+            # must_say/metric_values dicts every caller expects.
+            "checkpoints": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "covered": {"type": "boolean"},
+                        "detail": {"type": "string"},
+                    },
+                    "required": ["id", "covered", "detail"],
+                    "additionalProperties": False,
+                },
+            },
             # Each entry tags whether the customer asked about this checkpoint
             # first (customer_initiated=true) or the rep brought it up on their
             # own -- used by _order_adherence() to exempt "the customer asked,
@@ -908,12 +928,11 @@ def _analyze_schema(type_keys, drop_reasons):
                     "additionalProperties": False,
                 },
             },
-            "metric_values": {"type": "string"},  # also JSON-encoded, see must_say above
             "action_items": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["call_type", "summary", "sentiment", "sentiment_reason",
                      "early_exit_reason", "drop_note", "qa_score", "qa_notes",
-                     "must_say", "checkpoint_order", "metric_values", "action_items"],
+                     "checkpoints", "checkpoint_order", "action_items"],
         "additionalProperties": False,
     }
 
@@ -962,16 +981,25 @@ Fill in these fields:
   Only meaningful if early_exit_reason is "" — set to 0 if early_exit_reason is set.
 - "qa_notes": one or two sentences of coaching feedback. If early_exit_reason is
   set, note what the rep had covered well before the customer cut the call short.
-- "must_say": an object mapping each checkpoint id of the CHOSEN call_type to
-  true/false. Fill this in based on what ACTUALLY came up on the call, even if
-  early_exit_reason is set — if the rep covered 4 checkpoints before the
-  customer disengaged, mark those 4 true. This isn't used for scoring when
-  early_exit_reason is set (the rep isn't penalized for the rest), only to show
-  what progress was made.
+- "checkpoints": an array with ONE ENTRY per checkpoint id of the CHOSEN
+  call_type, each {{"id": ..., "covered": true/false, "detail": "..."}}.
+  Decide "covered" and "detail" BOTH together for each checkpoint so they can
+  never contradict each other: if "detail" holds real evidence from the call,
+  "covered" must be true; if "covered" is false, "detail" must be "". "detail"
+  is the actual value or detail mentioned on the call, where the checkpoint
+  involves one — e.g. an actual weight ("78kg"), a
+  measurement, a price quoted, a specific date, or a short summary of what the
+  client said (their diet, activity level, symptoms, feedback). Use "" for
+  checkpoints that are purely behavioral (e.g. a greeting) or where no
+  concrete detail was mentioned, even if covered is true. Fill this in based
+  on what ACTUALLY came up on the call, even if early_exit_reason is set — if
+  the rep covered 4 checkpoints before the customer disengaged, mark those 4
+  covered:true. This isn't used for scoring when early_exit_reason is set (the
+  rep isn't penalized for the rest), only to show what progress was made.
 - "checkpoint_order": an array of {{"id": ..., "customer_initiated": ...}}
-  objects — ONE ENTRY per checkpoint id that is true in "must_say" — listed in
-  the order they actually came up on the call (earliest first). E.g. if the
-  rep covered pricing before intro, pricing comes first in this array.
+  objects — ONE ENTRY per checkpoint id marked covered:true in "checkpoints" —
+  listed in the order they actually came up on the call (earliest first). E.g.
+  if the rep covered pricing before intro, pricing comes first in this array.
   "customer_initiated" is true if the CUSTOMER brought this topic up first
   (asked a question about it, or raised it themselves) and the rep responded
   to that; false if the REP brought it up on their own as part of running the
@@ -979,14 +1007,7 @@ Fill in these fields:
   asked out of the normal pitch order is doing their job correctly, not
   failing to follow the pitch flow — don't let "the customer asked about
   pricing early" make the call look disordered. Fill this in even if
-  early_exit_reason is set, same as "must_say".
-- "metric_values": an object mapping each checkpoint id of the CHOSEN call_type
-  to the actual value or detail mentioned on the call, where the checkpoint
-  involves one — e.g. an actual weight ("78kg"), a measurement, a price quoted,
-  a specific date, or a short summary of what the client said (their diet,
-  activity level, symptoms, feedback). Use "" for checkpoints that are purely
-  behavioral (e.g. a greeting) or where no concrete detail was mentioned. Fill
-  this in even if early_exit_reason is set, same as "must_say".
+  early_exit_reason is set, same as "checkpoints".
 - "action_items": array of short strings (follow-ups / next steps).
 
 Transcript:
@@ -997,8 +1018,32 @@ Return ONLY the JSON object."""
     try:
         result = _call_llm(system, user,
                             schema=_analyze_schema(list(types.keys()), DROP_REASONS),
-                            max_tokens=8000, effort="high")
+                            # 16000, not 8000: "checkpoints" is now a full
+                            # {id, covered, detail} object per checkpoint
+                            # (up to 13 for sales.enquiry) instead of two flat
+                            # maps, and thinking tokens share this same budget
+                            # -- 8000 was observed truncating mid-response
+                            # ("Unterminated string...") on a live test call.
+                            max_tokens=16000, effort="high")
         result["sentiment"] = _valid_sentiment(result.get("sentiment"))
+        # "checkpoints" unifies the covered/detail judgment per checkpoint
+        # (see _analyze_schema) so they can't drift apart -- split back into
+        # the must_say/metric_values dicts every other caller expects.
+        checkpoints = result.pop("checkpoints", [])
+        if isinstance(checkpoints, str):
+            try:
+                checkpoints = json.loads(checkpoints) if checkpoints.strip() else []
+            except ValueError:
+                checkpoints = []
+        must_say, metric_values = {}, {}
+        for item in checkpoints if isinstance(checkpoints, list) else []:
+            cid = isinstance(item, dict) and item.get("id")
+            if not cid:
+                continue
+            must_say[cid] = bool(item.get("covered"))
+            metric_values[cid] = item.get("detail", "")
+        result["must_say"] = must_say
+        result["metric_values"] = metric_values
         result["_analysis_failed"] = False
         return result
     except Exception as e:
