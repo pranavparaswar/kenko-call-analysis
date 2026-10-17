@@ -14,41 +14,57 @@ The system figures out which type a call is automatically from the transcript.
 
 ## Enquiry checklist (13 items)
 
-Each item has a weight: **3 = core**, **2 = important**, **1 = hygiene**.
-Your score = (weight of items you covered) ÷ (total weight of all items) × 100.
+Each item has a weight from 2 (lowest) to 5 (highest) reflecting how central
+it is to the pitch.
 
 | # | Checkpoint | What it means | Weight |
 |---|---|---|---|
-| 1 | Intro | Introduce yourself by name and mention The Kenko Life | 1 |
-| 2 | Health goals & conditions | Ask about the customer's health/nutrition goals and any relevant conditions | 3 |
-| 3 | Delivery location | Ask for and note the delivery address; mention multiple-address support if relevant | 2 |
-| 4 | Macros & calories | Mention that meals are macro- and calorie-counted | 2 |
-| 5 | Nutrition support | Mention ongoing nutrition/coach support throughout the journey, not just at signup | 2 |
-| 6 | Cuisine variety | Mention variety of meals/cuisines; menu doesn't repeat for 4 weeks | 2 |
-| 7 | Delivery schedule | Explain delivery happens 6 days/week within a delivery window | 2 |
-| 8 | Meal wallet flexibility | Explain 1 month = 26 meals, usable flexibly, with pause/cancel options | 3 |
-| 9 | Food temperature & handling | Explain food is delivered cold/refrigerated and must be refrigerated + reheated | 3 |
-| 10 | Veg/non-veg preference | Ask and note the customer's preference | 1 |
-| 11 | Price/offer | State the price and any current offer clearly | 3 |
-| 12 | App link for payment | Send the Kenko app link the moment the customer says they're ready to proceed | 3 |
-| 13 | Next step | Set a clear next step or follow-up | 1 |
+| 1 | Intro | Introduce yourself by name and mention The Kenko Life | 3 |
+| 2 | Healthy food to your doorstep | State the core pitch — healthy food delivered to the customer's doorstep | 5 |
+| 3 | Macro & calorie counted meals | Mention that meals are macro- and calorie-counted | 5 |
+| 4 | Nutritionist handholding | Explain a nutritionist/coach handholds the customer through their journey, not just at signup | 5 |
+| 5 | Menu doesn't repeat for a month | State the menu doesn't repeat for a month | 5 |
+| 6 | Multiple cuisines | Mention cuisine variety — **only counts if the customer asked** what kind of menu/food/cuisines Kenko serves; mentioning it unprompted doesn't count | 5 |
+| 7 | 6 days a week delivery | Explain delivery happens 6 days a week | 5 |
+| 8 | Pause & carry-forward, with example | Explain the pause/carry-forward flexibility **with a concrete example** (e.g. "if travelling, pause the next 3 days by 6 PM the day before") — explaining it without an example doesn't count | 5 |
+| 9 | Discovery question (duration) | Ask what the customer is looking for — **only counts if the customer responds with a duration**; asking without getting one doesn't count | 4 |
+| 10 | Pricing | State the price and any current offer clearly | 5 |
+| 11 | Freshness | Explain food arrives refrigerated/cold and needs refrigeration + reheating before eating | 5 |
+| 12 | Delivery address taken | Ask for and note the customer's delivery address | 2 |
+| 13 | Next steps to close | Set clear next steps to close the sale | 2 |
 
-**Total possible weight: 28.**
+**Total possible weight: 56.**
 
-### About the app link checkpoint
-This only counts against you if the customer actually indicated they were
-ready to proceed on that call and you didn't send the link. If that moment
-never came up, or it's a trial/non-standard plan, it's not held against you.
+### Your score has two halves
+`qa_score` = **50% checkpoint coverage + 50% pitch-order adherence.**
+
+- **Coverage** is the weighted share of the 13 checkpoints above you covered.
+- **Order adherence** checks how closely the checkpoints you *did* cover
+  followed this list's own order — that order is the required pitch flow.
+  It's scored by finding the longest run of checkpoints you covered that
+  stayed in the right relative sequence (so hitting 8 of 13, with 6 of those
+  in correct relative order, scores 75 on the order half). A checkpoint you
+  never covered isn't separately penalized for "being out of order" — missing
+  it already costs you on the coverage half.
 
 ## Follow-up checklist (6 items)
 
 Intro/reconnect, recap of the prior conversation, addressing objections,
 restating value/offer, sending the app link if the customer is ready, and
 asking for a decision/next step. These are currently unweighted (each counts
-equally toward the follow-up score).
+equally toward the follow-up score) and there's no order-adherence component.
 
 Follow-up calls are scored individually, but they're **not included** in the
 overall team/rep averages on the dashboard — only shown in the calls table.
+
+## The app link checkpoint
+
+Both enquiry and follow-up calls share this rule: payment is via the Kenko
+app link (not a payment gateway). The moment a customer says they're
+convinced and asks how to proceed — on whichever call that happens, not a
+separate "closing" call — you need to send the link. It's **not** held
+against you if that moment never came up on the call, or for trial /
+non-standard plans.
 
 ## Calls that don't count against you
 

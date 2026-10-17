@@ -6,12 +6,17 @@ Weekly pipeline: Callyzer call logs  ->  download recordings  ->  Sarvam
 speech-to-text (saaras:v4)  ->  LLM analysis (summary / sentiment / QA /
 must-say checklist)  ->  results.json  ->  dashboard.html
 
+The analysis step runs on Sarvam or Claude depending on
+CONFIG["ANALYSIS_PROVIDER"] (env var ANALYSIS_PROVIDER, default "sarvam" as of
+2026-10-17 pending Anthropic credits -- flip to "claude" when ready, see
+CLAUDE.md "Analysis engine").
+
 Run:  python pipeline.py                 (uses last 7 days by default)
       python pipeline.py --days 7
       python pipeline.py --demo           (no API calls, regenerates sample data)
 
 Requirements:
-      pip install requests sarvamai pydub
+      pip install requests sarvamai anthropic pydub
       # pydub needs ffmpeg installed for chunking long audio (brew install ffmpeg)
 
 Set your keys below in CONFIG (or via environment variables).
@@ -34,14 +39,26 @@ CONFIG = {
     "CALLYZER_TOKEN": os.environ.get("CALLYZER_TOKEN", "PASTE_CALLYZER_BEARER_TOKEN"),
     "CALLYZER_BASE": "https://api1.callyzer.co/api/v2.2",
 
-    # --- Sarvam ---
+    # --- Sarvam (speech-to-text, always; analysis too when ANALYSIS_PROVIDER=sarvam) ---
     "SARVAM_API_KEY": os.environ.get("SARVAM_API_KEY", "PASTE_SARVAM_API_KEY"),
-    "SARVAM_STT_MODEL": "saaras:v3",     # Batch API model (handles up to 2h/file)
+    "SARVAM_STT_MODEL": "saaras:v4",     # Batch API model (handles up to 2h/file);
+                                         # moved from v3 2026-10-17 per Sarvam's
+                                         # retirement notice -- lower WER, better
+                                         # Indic/code-mixed accuracy, drop-in swap
     "SARVAM_LANGUAGE": "en-IN",          # calls are mostly English
-    "SARVAM_CHAT_MODEL": "sarvam-105b",  # analysis step (sarvam-m / -30b deprecated)
+    "SARVAM_CHAT_MODEL": "sarvam-105b",  # analysis step, only used when
+                                         # ANALYSIS_PROVIDER=sarvam
     "DIARIZATION": True,                 # separate agent vs customer
     "NUM_SPEAKERS": 2,
     "BATCH_SIZE": 20,                    # max files per Sarvam batch job
+
+    # --- Analysis provider: role classification, QA scoring, must-say checklist ---
+    # One-line switch between the two -- same CALL_TYPES/prompts/schema-derived
+    # instructions feed both, see _call_llm(). Flip to "claude" the moment you
+    # have Anthropic credits (export ANALYSIS_PROVIDER=claude, or edit here).
+    "ANALYSIS_PROVIDER": os.environ.get("ANALYSIS_PROVIDER", "sarvam"),  # "sarvam" | "claude"
+    "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", "PASTE_ANTHROPIC_API_KEY"),
+    "CLAUDE_MODEL": "claude-sonnet-5",
     "ROLE_LLM_FALLBACK": False,          # guess role from transcript when a rep
                                          # isn't in employees.csv. Keep False so
                                          # roles come only from your tags.
@@ -194,11 +211,11 @@ CALL_TYPES = {
                 {"id": "menu_no_repeat_month", "label": "Menu doesn't repeat for a month", "weight": 5,
                  "criteria": "States that the menu doesn't repeat for a month."},
                 {"id": "multiple_cuisines", "label": "Multiple cuisines", "weight": 5,
-                 "criteria": "Mentions the variety of cuisines on offer, SPECIFICALLY in "
-                             "response to the customer asking what kind of menu/food/"
-                             "cuisines Kenko serves. Mentioning cuisine variety unprompted "
-                             "— without the customer having asked about the menu/food/"
-                             "cuisine type — does not count as a hit."},
+                 "criteria": "Mentions the variety of cuisines on offer, whether the "
+                             "customer asked about the menu/food/cuisine type or the rep "
+                             "brought it up on their own. Proactively mentioning cuisine "
+                             "variety counts the same as answering a direct question about "
+                             "it — both show the customer this information either way."},
                 {"id": "delivery_6_days", "label": "6 days a week delivery", "weight": 5,
                  "criteria": "Explains that delivery happens 6 days a week."},
                 {"id": "pause_carry_forward_example", "label": "Pause & carry-forward flexibility, with example", "weight": 5,
@@ -340,8 +357,42 @@ def _run_with_spinner(label, fn):
 
 
 # ----------------------------------------------------------------------------
-# Callyzer
+# Claude — client/call helper
 # ----------------------------------------------------------------------------
+_CLAUDE_CLIENT = None
+
+def _claude_client():
+    """Lazily-constructed singleton client. max_retries covers 429/5xx/
+    connection errors automatically (SDK default backoff) so callers don't
+    need their own retry loop."""
+    global _CLAUDE_CLIENT
+    if _CLAUDE_CLIENT is None:
+        import anthropic
+        _CLAUDE_CLIENT = anthropic.Anthropic(
+            api_key=CONFIG["ANTHROPIC_API_KEY"], max_retries=5)
+    return _CLAUDE_CLIENT
+
+
+def _call_claude(system, user, schema, max_tokens=8000, effort="high"):
+    """Call Claude with a JSON-schema-constrained response — output_config.format
+    guarantees the returned text block is valid JSON matching `schema`, so
+    callers can json.loads() it directly with no markdown-fence/escaping
+    cleanup (unlike the old Sarvam chat-completions path)."""
+    response = _claude_client().messages.create(
+        model=CONFIG["CLAUDE_MODEL"],
+        max_tokens=max_tokens,
+        system=system,
+        thinking={"type": "adaptive"},
+        output_config={
+            "effort": effort,
+            "format": {"type": "json_schema", "schema": schema},
+        },
+        messages=[{"role": "user", "content": user}],
+    )
+    text = next(b.text for b in response.content if b.type == "text")
+    return json.loads(text)
+
+
 def _post_sarvam_chat(payload, timeout=120, max_retries=4):
     """POST to Sarvam's chat completions endpoint with retry/backoff on
     transient network failures (DNS blips, dropped connections, timeouts) as
@@ -378,6 +429,56 @@ def _post_sarvam_chat(payload, timeout=120, max_retries=4):
     raise RuntimeError(f"Sarvam chat completions failed after {max_retries} attempts: {last_err}")
 
 
+def _parse_json(text):
+    """Parse a free-text model reply into JSON (Sarvam path only — Claude's
+    output_config.format guarantees valid JSON already, so it skips this
+    entirely). Tolerates a markdown code fence or an escaped apostrophe
+    (\\', invalid in strict JSON) before giving up. Raises ValueError on real
+    failure so callers hit the same except-block as a Claude API error,
+    instead of silently fabricating an all-missed score."""
+    if not text:
+        raise ValueError("empty model response")
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```\s*$", "", text.strip())
+    m = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if m:
+        candidate = m.group(0)
+        for attempt in (candidate, candidate.replace("\\'", "'")):
+            try:
+                return json.loads(attempt)
+            except Exception:
+                continue
+    raise ValueError(f"could not parse JSON from model response: {text[:200]!r}")
+
+
+def _call_llm(system, user, schema=None, max_tokens=8000, effort="high"):
+    """Dispatches to Claude or Sarvam per CONFIG['ANALYSIS_PROVIDER'] — same
+    system/user prompt text drives both, since the prompt already spells out
+    the exact JSON shape in plain English for every field (Claude additionally
+    gets `schema` as a structural guarantee; Sarvam relies on the text alone,
+    parsed via _parse_json). Switching providers is the one-line CONFIG change
+    described above ANALYSIS_PROVIDER — nothing else in analyze()/
+    analyze_short_call()/_classify_role() needs to change."""
+    if CONFIG["ANALYSIS_PROVIDER"] == "claude":
+        return _call_claude(system, user, schema=schema, max_tokens=max_tokens, effort=effort)
+    r = _post_sarvam_chat({
+        "model": CONFIG["SARVAM_CHAT_MODEL"],
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+        "temperature": 0.2,
+        # sarvam-105b is a reasoning model — its chain-of-thought eats into the
+        # completion budget before it reaches the final JSON, so callers pass
+        # a generous max_tokens (see analyze()'s comment for specifics).
+        "max_tokens": max_tokens,
+    })
+    msg = r.json()["choices"][0].get("message", {})
+    # sarvam-105b can return content=None with the text under reasoning_content
+    content = msg.get("content") or msg.get("reasoning_content") or ""
+    return _parse_json(content)
+
+
+# ----------------------------------------------------------------------------
+# Callyzer
+# ----------------------------------------------------------------------------
 def _post(url, headers, body, timeout=60, max_retries=5):
     """POST with automatic backoff on 429 (rate limit) / 5xx."""
     import requests
@@ -402,9 +503,22 @@ def _post(url, headers, body, timeout=60, max_retries=5):
     raise RuntimeError(f"Callyzer {r.status_code} at {url}: {r.text[:400]}")
 
 
-def fetch_call_logs(days):
+def ist_today_at(hour, minute=0):
+    """Epoch seconds for today's `hour`:`minute` India time (Asia/Kolkata),
+    regardless of the machine's own timezone -- the cloud sandbox this runs in
+    is not guaranteed to be IST, so naive dt.datetime.now() would silently
+    compute the wrong boundary. Used for the twice-daily sales reports (Mid
+    Day / End of Day), which need a same-calendar-day window rather than
+    fetch_call_logs's default rolling N-day window."""
+    from zoneinfo import ZoneInfo
+    now_ist = dt.datetime.now(ZoneInfo("Asia/Kolkata"))
+    start = now_ist.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return int(start.timestamp())
+
+
+def fetch_call_logs(days, since_ts=None):
     now = int(time.time())
-    call_from = now - days * 86400
+    call_from = since_ts if since_ts is not None else now - days * 86400
     headers = {
         "Authorization": f"Bearer {CONFIG['CALLYZER_TOKEN']}",
         "Content-Type": "application/json",
@@ -689,7 +803,7 @@ def _read_transcript(json_path):
 
 
 # ----------------------------------------------------------------------------
-# Sarvam — Analysis (chat completions)
+# Claude — Analysis (role classification, QA scoring, must-say checklist)
 # ----------------------------------------------------------------------------
 _CSV_ROLES = None
 
@@ -729,25 +843,70 @@ def detect_role(log, transcript=None, allow_llm=True):
     return None
 
 
+_ROLE_SCHEMA = {
+    "type": "object",
+    "properties": {"role": {"type": "string", "enum": ["sales", "nutrition"]}},
+    "required": ["role"],
+    "additionalProperties": False,
+}
+
 def _classify_role(transcript):
-    import requests
-    r = requests.post(
-        "https://api.sarvam.ai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {CONFIG['SARVAM_API_KEY']}",
-                 "Content-Type": "application/json"},
-        json={"model": CONFIG["SARVAM_CHAT_MODEL"], "temperature": 0,
-              "messages": [{"role": "user", "content":
-                "Classify this call as either 'sales' (pitching/selling a plan to a "
-                "prospect) or 'nutrition' (a nutritionist reviewing an existing "
-                "client's diet/progress). Reply with ONLY one word: sales or "
-                "nutrition.\n\n" + transcript[:3000]}]},
-        timeout=60)
-    ans = r.json()["choices"][0]["message"]["content"].strip().lower()
-    return "nutrition" if "nutri" in ans else "sales"
+    result = _call_llm(
+        system="You classify Kenko Life phone call transcripts by role. "
+               "Return STRICT JSON only.",
+        user="Classify this call as either 'sales' (pitching/selling a plan to a "
+             "prospect) or 'nutrition' (a nutritionist reviewing an existing "
+             "client's diet/progress). Return a JSON object: {\"role\": \"sales\"} "
+             "or {\"role\": \"nutrition\"}.\n\n" + transcript[:3000],
+        schema=_ROLE_SCHEMA, max_tokens=2048, effort="low")
+    return result.get("role", "sales")
+
+
+def _analyze_schema(type_keys, drop_reasons):
+    """must_say/metric_values stay open objects (keyed by whichever
+    checkpoint ids belong to the call_type the model picks) rather than
+    fixed per-checkpoint properties, since the checkpoint set differs by
+    call_type and the schema can't know in advance which one will be chosen."""
+    return {
+        "type": "object",
+        "properties": {
+            "call_type": {"type": "string", "enum": type_keys},
+            "summary": {"type": "string"},
+            "sentiment": {"type": "string", "enum": ["Positive", "Neutral", "Negative"]},
+            "sentiment_reason": {"type": "string"},
+            "early_exit_reason": {"type": "string", "enum": [""] + drop_reasons},
+            "drop_note": {"type": "string"},
+            "qa_score": {"type": "integer", "minimum": 0, "maximum": 100},
+            "qa_notes": {"type": "string"},
+            "must_say": {"type": "object", "additionalProperties": {"type": "boolean"}},
+            # Each entry tags whether the customer asked about this checkpoint
+            # first (customer_initiated=true) or the rep brought it up on their
+            # own -- used by _order_adherence() to exempt "the customer asked,
+            # the rep correctly answered" moments from the pitch-order penalty
+            # (answering a direct question isn't a pitch-flow failure).
+            "checkpoint_order": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "customer_initiated": {"type": "boolean"},
+                    },
+                    "required": ["id", "customer_initiated"],
+                    "additionalProperties": False,
+                },
+            },
+            "metric_values": {"type": "object", "additionalProperties": {"type": "string"}},
+            "action_items": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["call_type", "summary", "sentiment", "sentiment_reason",
+                     "early_exit_reason", "drop_note", "qa_score", "qa_notes",
+                     "must_say", "checkpoint_order", "metric_values", "action_items"],
+        "additionalProperties": False,
+    }
 
 
 def analyze(transcript, role, name=""):
-    import requests
     types = CALL_TYPES.get(role, CALL_TYPES["sales"])
     role_label = "nutritionist" if role == "nutrition" else "sales"
 
@@ -775,36 +934,47 @@ rep discovers early on that the delivery location isn't serviceable. In those
 cases the rep never had the opportunity to hit most checkpoints, so it isn't
 fair to score them against the full checklist.
 
-Return JSON with EXACTLY these keys:
+Fill in these fields:
 - "call_type": one of {type_keys}.
 - "summary": 2-3 sentence summary of the call.
-- "sentiment": one of "Positive", "Neutral", "Negative" (customer's overall sentiment).
+- "sentiment": the customer's overall sentiment.
 - "sentiment_reason": one short sentence.
 - "early_exit_reason": "" if the rep had a genuine opportunity to work through
   the checklist (even if the customer ultimately declined at the end). Otherwise
-  one of {", ".join(f'"{d}"' for d in DROP_REASONS)} — use this ONLY when the
-  call ended early through no fault of the rep (e.g. customer refused to engage
-  almost immediately, or the location turned out to be undeliverable), before
-  most checkpoints could reasonably come up.
+  set it ONLY when the call ended early through no fault of the rep (e.g.
+  customer refused to engage almost immediately, or the location turned out to
+  be undeliverable), before most checkpoints could reasonably come up.
 - "drop_note": if early_exit_reason is set, one short sentence on what happened;
   otherwise "".
 - "qa_score": integer 0-100 rating the rep's overall call quality FOR THAT CALL TYPE.
-  Only meaningful if early_exit_reason is "".
-- "qa_notes": one or two sentences of coaching feedback. Only meaningful if
-  early_exit_reason is "".
+  Only meaningful if early_exit_reason is "" — set to 0 if early_exit_reason is set.
+- "qa_notes": one or two sentences of coaching feedback. If early_exit_reason is
+  set, note what the rep had covered well before the customer cut the call short.
 - "must_say": an object mapping each checkpoint id of the CHOSEN call_type to
-  true/false. Only meaningful if early_exit_reason is "".
-- "checkpoint_order": an array of checkpoint ids — ONLY the ids that are true
-  in "must_say" — listed in the order they actually came up on the call
-  (earliest first). E.g. if the rep covered pricing before intro, pricing
-  comes first in this array. Only meaningful if early_exit_reason is "".
+  true/false. Fill this in based on what ACTUALLY came up on the call, even if
+  early_exit_reason is set — if the rep covered 4 checkpoints before the
+  customer disengaged, mark those 4 true. This isn't used for scoring when
+  early_exit_reason is set (the rep isn't penalized for the rest), only to show
+  what progress was made.
+- "checkpoint_order": an array of {{"id": ..., "customer_initiated": ...}}
+  objects — ONE ENTRY per checkpoint id that is true in "must_say" — listed in
+  the order they actually came up on the call (earliest first). E.g. if the
+  rep covered pricing before intro, pricing comes first in this array.
+  "customer_initiated" is true if the CUSTOMER brought this topic up first
+  (asked a question about it, or raised it themselves) and the rep responded
+  to that; false if the REP brought it up on their own as part of running the
+  pitch. This distinction matters: a rep who answers a question the customer
+  asked out of the normal pitch order is doing their job correctly, not
+  failing to follow the pitch flow — don't let "the customer asked about
+  pricing early" make the call look disordered. Fill this in even if
+  early_exit_reason is set, same as "must_say".
 - "metric_values": an object mapping each checkpoint id of the CHOSEN call_type
   to the actual value or detail mentioned on the call, where the checkpoint
   involves one — e.g. an actual weight ("78kg"), a measurement, a price quoted,
   a specific date, or a short summary of what the client said (their diet,
   activity level, symptoms, feedback). Use "" for checkpoints that are purely
-  behavioral (e.g. a greeting) or where no concrete detail was mentioned. Only
-  meaningful if early_exit_reason is "".
+  behavioral (e.g. a greeting) or where no concrete detail was mentioned. Fill
+  this in even if early_exit_reason is set, same as "must_say".
 - "action_items": array of short strings (follow-ups / next steps).
 
 Transcript:
@@ -812,27 +982,20 @@ Transcript:
 
 Return ONLY the JSON object."""
 
-    r = _post_sarvam_chat({
-        "model": CONFIG["SARVAM_CHAT_MODEL"],
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": user}],
-        "temperature": 0.2,
-        # sarvam-105b is a reasoning model — its chain-of-thought eats into the
-        # completion budget before it reaches the final JSON. The API's default
-        # cap (2048) is too low for this prompt (long checkpoint list + long
-        # transcript): the response hits finish_reason="length" mid-reasoning,
-        # content comes back None, and reasoning_content alone (no closing JSON)
-        # fails to parse. 8000 leaves headroom (~5300 tokens observed in testing).
-        "max_tokens": 8000,
-    }, timeout=120)
-    msg = r.json()["choices"][0].get("message", {})
-    # sarvam-105b can return content=None with the text under reasoning_content
-    content = msg.get("content") or msg.get("reasoning_content") or ""
-    return _parse_json(content, default={
-        "call_type": "", "summary": "", "sentiment": "Neutral",
-        "sentiment_reason": "", "early_exit_reason": "", "drop_note": "",
-        "qa_score": 0, "qa_notes": "", "must_say": {}, "checkpoint_order": [],
-        "metric_values": {}, "action_items": [], "_analysis_failed": True})
+    try:
+        result = _call_llm(system, user,
+                            schema=_analyze_schema(list(types.keys()), DROP_REASONS),
+                            max_tokens=8000, effort="high")
+        result["sentiment"] = _valid_sentiment(result.get("sentiment"))
+        result["_analysis_failed"] = False
+        return result
+    except Exception as e:
+        print(f"\n   analysis error: {e}")
+        return {
+            "call_type": "", "summary": "", "sentiment": "Neutral",
+            "sentiment_reason": "", "early_exit_reason": "", "drop_note": "",
+            "qa_score": 0, "qa_notes": "", "must_say": {}, "checkpoint_order": [],
+            "metric_values": {}, "action_items": [], "_analysis_failed": True}
 
 
 # Calls under MIN_DURATION_SEC still get a recording sometimes (quick connects,
@@ -841,8 +1004,19 @@ Return ONLY the JSON object."""
 DROP_REASONS = ["call_later", "not_interested", "wrong_number", "no_answer",
                 "busy_hangup", "undeliverable_location", "other"]
 
+_SHORT_CALL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "drop_reason": {"type": "string", "enum": DROP_REASONS},
+        "drop_note": {"type": "string"},
+        "callback_time": {"type": "string"},
+        "sentiment": {"type": "string", "enum": ["Positive", "Neutral", "Negative"]},
+    },
+    "required": ["drop_reason", "drop_note", "callback_time", "sentiment"],
+    "additionalProperties": False,
+}
+
 def analyze_short_call(transcript, role, name=""):
-    import requests
     role_label = "nutritionist" if role == "nutrition" else "sales"
     system = (
         f"You are a QA analyst for The Kenko Life. This is a SHORT phone call "
@@ -863,40 +1037,16 @@ Transcript:
 
 Return ONLY the JSON object."""
 
-    r = _post_sarvam_chat({
-        "model": CONFIG["SARVAM_CHAT_MODEL"],
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": user}],
-        "temperature": 0.2,
-        "max_tokens": 3000,  # same reasoning-budget issue as analyze(), smaller margin
-    }, timeout=60)
-    msg = r.json()["choices"][0].get("message", {})
-    content = msg.get("content") or msg.get("reasoning_content") or ""
-    return _parse_json(content, default={
-        "drop_reason": "other", "drop_note": "", "callback_time": "",
-        "sentiment": "Neutral", "_analysis_failed": True})
-
-
-def _parse_json(text, default):
-    """Parse the model's JSON reply. The model sometimes wraps it in a markdown
-    code fence, or escapes an apostrophe as \\' (invalid in strict JSON) — both
-    are tolerated here before giving up, so a formatting quirk doesn't silently
-    zero out a rep's score. On real failure, _analysis_failed=True is set so
-    callers can skip scoring instead of recording a false 0/all-missed."""
-    if not text:
-        return {**default, "qa_notes": "Empty model response"}
-    cleaned = re.sub(r"^```(?:json)?\s*|\s*```\s*$", "", text.strip())
-    m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if m:
-        candidate = m.group(0)
-        for attempt in (candidate, candidate.replace("\\'", "'")):
-            try:
-                parsed = json.loads(attempt)
-                parsed["_analysis_failed"] = False
-                return parsed
-            except Exception:
-                continue
-    return {**default, "qa_notes": "Parse error"}
+    try:
+        result = _call_llm(system, user, schema=_SHORT_CALL_SCHEMA,
+                            max_tokens=3000, effort="low")
+        result["sentiment"] = _valid_sentiment(result.get("sentiment"))
+        result["_analysis_failed"] = False
+        return result
+    except Exception as e:
+        print(f"\n   analysis error: {e}")
+        return {"drop_reason": "other", "drop_note": "", "callback_time": "",
+                "sentiment": "Neutral", "_analysis_failed": True}
 
 
 # ----------------------------------------------------------------------------
@@ -975,14 +1125,16 @@ def reprocess():
         elif not failed and a.get("early_exit_reason"):
             # Call ran >= MIN_DURATION_SEC but ended through no fault of the
             # rep (customer disengaged almost immediately, or the location
-            # was undeliverable) — treat like a short call, no qa_score.
-            c["call_type"] = ""
-            c["summary"] = ""
+            # was undeliverable) — treat like a short call, no qa_score. Keep
+            # whatever checklist progress the rep made before the cutoff for
+            # the call-detail view (coaching signal, no scoring impact).
+            c["call_type"] = _valid_type(role, a.get("call_type", ""))
+            c["summary"] = a.get("summary", "")
             c["sentiment"] = a.get("sentiment", "Neutral")
             c["sentiment_reason"] = ""
-            c["must_say"] = {}
-            c["checkpoint_order"] = []
-            c["metric_values"] = {}
+            c["must_say"] = a.get("must_say", {})
+            c["checkpoint_order"] = a.get("checkpoint_order", [])
+            c["metric_values"] = a.get("metric_values", {})
             c["qa_score"] = None
             c["qa_score_model"] = None
             c["qa_notes"] = ""
@@ -1013,14 +1165,20 @@ def reprocess():
           f"-> results.json / dashboard.html")
 
 
-def run(days):
+def run(days, since_ts=None):
     global _CSV_ROLES
     _CSV_ROLES = load_csv_roles()
     n_tagged = sum(1 for k in _CSV_ROLES if k.startswith("#"))
     print(f"Loaded {n_tagged} tagged employees from employees.csv")
 
-    print(f"Fetching Callyzer logs (last {days} days)...")
-    logs = fetch_call_logs(days)
+    if since_ts is not None:
+        from zoneinfo import ZoneInfo
+        since_label = dt.datetime.fromtimestamp(
+            since_ts, tz=ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M IST")
+        print(f"Fetching Callyzer logs (since {since_label})...")
+    else:
+        print(f"Fetching Callyzer logs (last {days} days)...")
+    logs = fetch_call_logs(days, since_ts=since_ts)
     print(f"  {len(logs)} calls found.")
 
     # 1) download recordings (skip roles with no checklist, e.g. Ops, before
@@ -1112,11 +1270,22 @@ def _row(log, transcript, analysis, role):
     # it like a short call (drop_reason, no qa_score) instead of penalizing
     # the rep for checkpoints they never had a chance to hit.
     if not failed and analysis.get("early_exit_reason"):
+        # qa_score/rollup exclusion is unaffected -- the rep still isn't
+        # penalized for checkpoints they never had a chance to hit. But
+        # whatever WAS covered before the customer cut the call short is
+        # worth keeping for the call-detail view (coaching signal), instead
+        # of discarding it the way a genuine sub-30s call (which never had
+        # this data to begin with) does.
         return _short_row(log, transcript, {
             "drop_reason": analysis["early_exit_reason"],
             "drop_note": analysis.get("drop_note", ""),
             "callback_time": "",
             "sentiment": analysis.get("sentiment", "Neutral"),
+            "call_type": _valid_type(role, analysis.get("call_type", "")),
+            "summary": analysis.get("summary", ""),
+            "must_say": analysis.get("must_say", {}),
+            "checkpoint_order": analysis.get("checkpoint_order", []),
+            "metric_values": analysis.get("metric_values", {}),
             "_analysis_failed": False,
         }, role)
     call_type = "" if failed else _valid_type(role, analysis.get("call_type", ""))
@@ -1167,13 +1336,18 @@ def _short_row(log, transcript, analysis, role):
                           else (log.get("client_number") or "")),
         "duration_sec": log.get("duration", 0),
         "direction": log.get("call_type", ""),
-        "call_type": "",
+        # call_type/summary/must_say/etc. are "" / {} / [] for a genuine
+        # sub-30s call (analyze_short_call never produces them) but carry the
+        # partial checklist for a longer early-exit call (see _row()).
+        "call_type": analysis.get("call_type", ""),
         "transcript": transcript,
-        "summary": "",
+        "summary": analysis.get("summary", ""),
         "sentiment": analysis.get("sentiment", "Neutral"),
         "sentiment_reason": "",
         "qa_score": None, "qa_score_model": None, "qa_notes": "",
-        "must_say": {}, "checkpoint_order": [], "metric_values": {}, "action_items": [],
+        "must_say": analysis.get("must_say", {}),
+        "checkpoint_order": analysis.get("checkpoint_order", []),
+        "metric_values": analysis.get("metric_values", {}), "action_items": [],
         "drop_reason": "other" if failed else analysis.get("drop_reason", "other"),
         "drop_note": "" if failed else analysis.get("drop_note", ""),
         "callback_time": "" if failed else analysis.get("callback_time", ""),
@@ -1216,6 +1390,25 @@ def _valid_type(role, t):
         next(iter(CALL_TYPES.get(role, {})), ""))
 
 
+def _valid_sentiment(s):
+    """Clamp to the Positive/Neutral/Negative enum. Claude's output_config.format
+    already guarantees this, so it's a no-op there -- but Sarvam has no schema
+    enforcement and has been observed drifting off-enum (e.g. "interested",
+    "cautiously interested") despite the prompt spelling out the three options,
+    which would otherwise pollute the dashboard's sentiment chart with stray
+    categories."""
+    s = (s or "").strip().lower()
+    # Check negative first -- "not interested" / "uninterested" otherwise matches
+    # the generic "interest" positive keyword below and would flip the polarity.
+    if ("neg" in s or "frustrat" in s or "annoy" in s or "angry" in s or
+            "upset" in s or "disappoint" in s or "not interest" in s or
+            "no interest" in s or "uninterest" in s or "disinterest" in s):
+        return "Negative"
+    if "pos" in s or "interest" in s or "happy" in s or "excit" in s:
+        return "Positive"
+    return "Neutral"
+
+
 def _order_adherence(ideal_ids, checkpoint_order):
     """0-100: how well `checkpoint_order` (the ids the rep actually covered,
     in the order they came up) follows `ideal_ids` (the required pitch flow).
@@ -1224,15 +1417,37 @@ def _order_adherence(ideal_ids, checkpoint_order):
     `ideal_ids`), as a share of the checkpoints the rep covered at all —
     e.g. covering 8 checkpoints with 6 of them in correct relative order
     scores 75. A checkpoint id not in the ideal list (model typo) is ignored;
-    duplicates are collapsed to their first occurrence."""
+    duplicates are collapsed to their first occurrence.
+
+    Entries tagged customer_initiated=True (the customer asked about this
+    topic and the rep answered) are excluded entirely -- answering a question
+    the customer asked out of the normal pitch order is correct behavior, not
+    a pitch-flow failure, so it shouldn't count against order adherence either
+    way. If every covered checkpoint was customer-initiated, there's nothing
+    to judge the rep's own ordering on, so this returns 100 (neutral) rather
+    than 0. Each entry may be the new {"id", "customer_initiated"} shape or a
+    bare id string (older cached data predating this field) -- a bare string
+    is treated as customer_initiated=False, preserving its original scoring."""
     pos = {cid: i for i, cid in enumerate(ideal_ids)}
-    seq, seen = [], set()
-    for cid in checkpoint_order or []:
-        if cid in pos and cid not in seen:
-            seq.append(pos[cid])
-            seen.add(cid)
+    seq, seen, any_covered = [], set(), False
+    for entry in checkpoint_order or []:
+        if isinstance(entry, dict):
+            cid, customer_initiated = entry.get("id"), entry.get("customer_initiated", False)
+        else:
+            cid, customer_initiated = entry, False
+        if cid not in pos or cid in seen:
+            continue
+        any_covered = True
+        seen.add(cid)
+        if customer_initiated:
+            continue
+        seq.append(pos[cid])
     if not seq:
-        return 0
+        # Nothing rep-initiated to judge order on. If the rep covered zero
+        # checkpoints at all, that's a real coverage failure -- score 0, same
+        # as before. If everything covered was customer-initiated, there's no
+        # evidence the rep's OWN ordering was ever off -- score 100 (neutral).
+        return 100 if any_covered else 0
     # Longest increasing subsequence length (patience-sorting, O(n log n)).
     tails = []
     for x in seq:
@@ -1368,6 +1583,10 @@ def check(days):
         print("\n  Sample record fields:", ", ".join(sorted(logs[0].keys())))
     sk = "set" if not CONFIG["SARVAM_API_KEY"].startswith("PASTE") else "NOT set"
     print(f"  SARVAM_API_KEY is {sk}.")
+    ak = "set" if not CONFIG["ANTHROPIC_API_KEY"].startswith("PASTE") else "NOT set"
+    print(f"  ANTHROPIC_API_KEY is {ak}.")
+    print(f"  ANALYSIS_PROVIDER is {CONFIG['ANALYSIS_PROVIDER']!r} "
+          f"(switch via ANALYSIS_PROVIDER env var or CONFIG in pipeline.py).")
 
 
 if __name__ == "__main__":
