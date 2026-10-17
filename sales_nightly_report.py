@@ -264,9 +264,11 @@ def upload_dashboard_to_drive(local_path, filename, rep_email, cc_list):
     return file.get("webViewLink") or f"https://drive.google.com/file/d/{file_id}/view"
 
 
-def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, cloud=False, test_mode=False):
+def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, cloud=False,
+                    test_mode=False, report_label=None):
     today = dt.date.today().isoformat()
-    subject = f"{rep_name} — Call Coverage — {today}"
+    label_suffix = f" — {report_label}" if report_label else ""
+    subject = f"{rep_name} — Call Coverage{label_suffix} — {today}"
     if test_mode:
         subject = "[TEST] " + subject
     cc_list = [] if test_mode else CC_LIST
@@ -277,11 +279,13 @@ def send_rep_email(rep_name, rep_email, single_stats, pdf_path, dashboard_path, 
     dashboard_link = None
     if cloud:
         dashboard_link = upload_dashboard_to_drive(
-            dashboard_path, f"{rep_name} — Call Coverage — {today}.html", rep_email, cc_list)
+            dashboard_path, f"{rep_name} — Call Coverage{label_suffix} — {today}.html",
+            rep_email, cc_list)
 
     lines = [
         f"Hi {rep_name.split()[0]},", "",
-        f"Your call coverage for {today}:",
+        (f"Your {report_label.lower()} for {today}:" if report_label
+         else f"Your call coverage for {today}:"),
         f"- {s['recorded']}/{s['total']} calls recorded ({s['rec_pct']}%)",
         f"- Avg QA score: {avg}",
         "",
@@ -402,12 +406,24 @@ def main():
                           "the first N calls (across all reps) before building or "
                           "sending anything -- combine with --no-refresh for a fast, "
                           "zero-Sarvam-cost end-to-end test of the email/Drive flow.")
+    ap.add_argument("--since-hour", type=int, default=None,
+                     help="India-time (IST) hour (0-23) to fetch calls SINCE today, "
+                          "instead of --days' rolling N-day window -- e.g. --since-hour 0 "
+                          "fetches every call from today's midnight onward. For the "
+                          "twice-daily Mid Day / End of Day reports, which need a "
+                          "same-calendar-day window rather than a rolling 24h one.")
+    ap.add_argument("--report-label", default=None,
+                     help='Short label shown in the email subject/body and PDF title, '
+                          'e.g. "Mid Day Report" or "End of Day Report". Omit for the '
+                          'plain ad-hoc "Call Coverage" subject.')
     args = ap.parse_args()
 
     try:
         if not args.no_refresh:
             import pipeline
-            pipeline.run(args.days)
+            since_ts = (pipeline.ist_today_at(args.since_hour)
+                        if args.since_hour is not None else None)
+            pipeline.run(args.days, since_ts=since_ts)
 
         sales_reps = load_sales_reps()
         if not sales_reps:
@@ -461,13 +477,15 @@ def main():
         dashboard_path = OUT_DIR / f"sales_nightly_{alias}_dashboard.html"
 
         build_dashboard(rep_payload, dashboard_path)
-        build_pdf({name: stats[name]}, rep_payload, pdf_path,
-                  title=f"{name} — Call Coverage")
+        pdf_title = (f"{name} — {args.report_label}" if args.report_label
+                     else f"{name} — Call Coverage")
+        build_pdf({name: stats[name]}, rep_payload, pdf_path, title=pdf_title)
 
         if args.send:
             send_to = args.test_recipient or rep["email"]
             send_rep_email(name, send_to, stats, pdf_path, dashboard_path,
-                            cloud=args.cloud, test_mode=bool(args.test_recipient))
+                            cloud=args.cloud, test_mode=bool(args.test_recipient),
+                            report_label=args.report_label)
 
     if missing_email and args.send:
         send_warning_email(
