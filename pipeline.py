@@ -1193,6 +1193,21 @@ def run(days, since_ts=None):
     logs = fetch_call_logs(days, since_ts=since_ts)
     print(f"  {len(logs)} calls found.")
 
+    # Intraday reruns (Mid Day / End of Day both pass since_ts="today midnight")
+    # re-fetch the SAME calls from earlier today. Reuse any call already
+    # resolved by an earlier run today instead of re-billing Claude/Sarvam for
+    # it -- only "error" rows are retried, since those never got a real result.
+    # Scoped to since_ts (not the plain --days N historical path) since that's
+    # the only caller that re-requests a window it already processed.
+    existing_by_id = {}
+    if since_ts is not None:
+        try:
+            prior = json.loads((Path(CONFIG["OUT_DIR"]) / "results.json").read_text())
+            existing_by_id = {c["call_id"]: c for c in prior.get("calls", [])
+                               if c.get("status") in ("done", "short", "missed")}
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
     # 1) download recordings (skip roles with no checklist, e.g. Ops, before
     #    spending anything on transcription). Calls with no recording (0-duration
     #    / didn't connect) never had audio to begin with — log them as "missed"
@@ -1202,11 +1217,16 @@ def run(days, since_ts=None):
     skipped_role = 0
     untagged = {}                       # rep -> count, for reps not in employees.csv
     missed = 0
+    reused = 0
     print("  Downloading recordings...")
     for i, log in enumerate(logs, 1):
         _bar(i, len(logs), prefix="")
-        rec_url = log.get("call_recording_url")
         cid = str(log.get("id", i))
+        if cid in existing_by_id:
+            results.append(existing_by_id[cid])
+            reused += 1
+            continue
+        rec_url = log.get("call_recording_url")
         pre = detect_role(log, allow_llm=False)
         if pre is None:                 # rep not found in employees.csv
             who = f"{log.get('emp_name','?')} ({log.get('emp_number','?')})"
@@ -1233,6 +1253,8 @@ def run(days, since_ts=None):
             print(f"     - {who}: {n} call(s)  -> add a role for this number in employees.csv")
     if missed:
         print(f"  logged {missed} missed/unconnected calls (no recording, no analysis).")
+    if reused:
+        print(f"  reused {reused} call(s) already analyzed in an earlier run today.")
     print(f"  {len(items)} recordings downloaded for analysis.")
 
     # 2) transcribe in batches (Sarvam Batch API)
@@ -1240,6 +1262,14 @@ def run(days, since_ts=None):
 
     # 3) analyze each transcript — full checklist if >= MIN_DURATION_SEC,
     #    otherwise a lightweight drop-reason classification.
+    # Checkpointed to results.json every CHECKPOINT_EVERY calls. A cloud
+    # routine's backgrounded run has a hard ~30min cap; analyzing 100+ calls
+    # one at a time can exceed it. Transcripts survive a kill either way
+    # (cached per-call in transcripts_cache.json), but analysis results
+    # didn't -- without this, a kill mid-loop lost everything analyzed so
+    # far. With it, the next run picks the checkpoint up via the
+    # existing_by_id reuse above instead of redoing the whole day.
+    CHECKPOINT_EVERY = 10
     total = len(transcripts)
     print("  Analyzing transcripts...")
     for n, (cid, transcript) in enumerate(transcripts.items(), 1):
@@ -1261,6 +1291,8 @@ def run(days, since_ts=None):
         except Exception as e:
             print(f"\n   analysis error (call {cid}): {e}")
             continue
+        if n % CHECKPOINT_EVERY == 0:
+            _write(results, days)
 
     _write(results, days)
     scored = sum(1 for r in results if r["status"] == "done")
