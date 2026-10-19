@@ -10,6 +10,8 @@ results.json
 results.csv
 results_backup*.json
 transcripts_cache.json
+# ad-hoc transcript exports (raw customer call content + phone numbers)
+*_transcripts_*.md
 dashboard.html
 sales_nightly_dashboard.html
 sales_nightly_summary.pdf

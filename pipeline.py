@@ -31,6 +31,8 @@ import argparse
 import datetime as dt
 from pathlib import Path
 
+import drive_cache          # Google-Drive-backed cache sync; inert unless enabled()
+
 # ----------------------------------------------------------------------------
 # CONFIG  — edit this section
 # ----------------------------------------------------------------------------
@@ -700,6 +702,11 @@ def _load_transcript_cache():
 
 def _save_transcript_cache(cache):
     _cache_path().write_text(json.dumps(cache, ensure_ascii=False, indent=2))
+    # Mirror to Drive so a run killed mid-transcription doesn't lose the
+    # transcripts it already paid Sarvam for. Throttled (this is called after
+    # every single transcription, and the file runs to several MB) and a no-op
+    # unless --cache-sync-drive was passed.
+    drive_cache.push_throttled(CONFIG["OUT_DIR"], "transcripts_cache.json", min_seconds=180)
 
 
 def transcribe_batch(items):
@@ -1228,6 +1235,14 @@ def run(days, since_ts=None):
     n_tagged = sum(1 for k in _CSV_ROLES if k.startswith("#"))
     print(f"Loaded {n_tagged} tagged employees from employees.csv")
 
+    # Pull the shared caches down FIRST -- before results.json is read for the
+    # skip-already-analyzed set below, and before transcribe_batch() consults
+    # transcripts_cache.json. A cloud run starts from a fresh git clone, so
+    # without this there is nothing on disk to resume from. No-op locally.
+    if drive_cache.is_enabled():
+        print("Syncing caches from Google Drive...")
+        drive_cache.pull(CONFIG["OUT_DIR"])
+
     if since_ts is not None:
         from zoneinfo import ZoneInfo
         since_label = dt.datetime.fromtimestamp(
@@ -1338,8 +1353,16 @@ def run(days, since_ts=None):
             continue
         if n % CHECKPOINT_EVERY == 0:
             _write(results, days)
+            # Mirror the checkpoint to Drive (throttled) so the ~30min
+            # background-task kill can't discard analysis already paid for.
+            drive_cache.push_throttled(CONFIG["OUT_DIR"], "results.json", min_seconds=120)
 
     _write(results, days)
+    # Final, unthrottled push so the next scheduled run resumes from a complete
+    # picture rather than the last throttled checkpoint.
+    if drive_cache.is_enabled():
+        print("Syncing caches to Google Drive...")
+        drive_cache.push(CONFIG["OUT_DIR"])
     scored = sum(1 for r in results if r["status"] == "done")
     print(f"Done. {len(results)} calls captured ({scored} fully scored, "
           f"{missed} missed, {sum(1 for r in results if r['status']=='short')} short) "

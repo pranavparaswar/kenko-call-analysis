@@ -412,6 +412,14 @@ def main():
                           "fetches every call from today's midnight onward. For the "
                           "twice-daily Mid Day / End of Day reports, which need a "
                           "same-calendar-day window rather than a rolling 24h one.")
+    ap.add_argument("--cache-sync-drive", action="store_true",
+                     help="CLOUD RUNS: pull results.json/transcripts_cache.json from "
+                          "the Shared Drive before running and push them back after. "
+                          "Each cloud routine run gets a fresh sandbox + git clone and "
+                          "both files are gitignored, so without this every run "
+                          "re-transcribes and re-analyzes the whole day from midnight. "
+                          "Leave OFF locally -- it would overwrite your local caches "
+                          "with the shared copy.")
     ap.add_argument("--report-label", default=None,
                      help='Short label shown in the email subject/body and PDF title, '
                           'e.g. "Mid Day Report" or "End of Day Report". Omit for the '
@@ -419,6 +427,9 @@ def main():
     args = ap.parse_args()
 
     try:
+        if args.cache_sync_drive:
+            import drive_cache
+            drive_cache.enable()
         if not args.no_refresh:
             import pipeline
             since_ts = (pipeline.ist_today_at(args.since_hour)
