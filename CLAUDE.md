@@ -182,3 +182,40 @@ python3 pipeline.py --days N        # full run (transcribes -> bills Sarvam + Cl
 
 Full taxonomy: `CALL_TYPES` in `pipeline.py`. See `START_HERE.md` and `docs/` for
 architecture, integration, and roadmap details.
+
+## Nutritionist export zips: the daily routine
+
+Nutritionist consultations don't come from Callyzer — they arrive as an export
+zip, parsed by one of two modules depending on the zip's shape:
+`nutrition_export_run.py` (flat Storage pull, root `manifest.csv`) or
+`consultation_export.py` (Firebase export, `consultations/<doc_id>/document.json`).
+Both emit the same 22-column `consultation_analysis` CSV.
+
+`nutrition_zip_routine.py` wraps both so a scheduled cloud run owns the whole
+loop unattended: pick the newest `.zip` out of the **"Nutrition Call Exports"**
+Shared Drive folder (id `1E1s-CCEnuSJ3SYHAn4IORZc1wr9xl9JL`), detect the shape,
+parse, upload the CSV back to that folder, and emit the run email as a
+`CLOUD_EMAIL_JSON:` line for the calling agent's Gmail tool (same pattern as
+`sales_nightly_report.py` — the cloud sandbox permits HTTPS, not raw SMTP).
+
+```bash
+python3 nutrition_zip_routine.py --ensure-folder   # create/find the Drive folder, print its link
+python3 nutrition_zip_routine.py --zip F --dry-run --limit 3   # local test; uploads nothing, emails nobody
+python3 nutrition_zip_routine.py --cloud --cache-sync-drive    # what the routine runs
+```
+
+Shape detection matches the paths each loader actually *consumes* — notably
+`consultations/<doc_id>/...`, not any `*/document.json` — so it can't select a
+parser that then silently finds zero records. A recognised zip with nothing
+analysable in it is called out in the email rather than passing as a normal day,
+and an unrecognised zip is a hard error naming the archive's top entries.
+
+Record processing stops at `--max-minutes` (default 20) because a backgrounded
+cloud run is killed at ~30 and transcription is the slow part. Nothing is lost:
+the extract/transcript caches checkpoint per record and sync through Drive
+(`drive_cache.pull()/push()` take explicit filenames for this), so the next run
+resumes rather than re-paying Sarvam. Re-running the same zip is therefore
+cheap — every already-processed record is served from cache.
+
+Scheduled as the **"Nutrition call analysis"** routine, daily 09:00 IST
+(`30 3 * * *` UTC): https://claude.ai/code/routines/trig_01B7WHWSe5ytTWfrVkxwLLd5
