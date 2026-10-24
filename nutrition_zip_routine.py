@@ -61,9 +61,10 @@ import drive_cache
 # NUTRITION_ZIP_FOLDER_ID / --folder-id override it if you'd rather pin one.
 FOLDER_NAME = os.environ.get("NUTRITION_ZIP_FOLDER_NAME", "Nutrition Call Exports")
 
-# Who gets the run email. Management CC isn't wired in here on purpose: these
-# CSVs carry raw transcripts, so the default is the narrowest useful audience.
-DEFAULT_TO = os.environ.get("NUTRITION_REPORT_TO", "pranav@thekenkolife.com")
+# Who gets the run email and the CSV's Drive share. A CC list isn't wired in
+# here on purpose: these CSVs carry raw transcripts, so the default is the
+# narrowest useful audience -- the person who actually works the export.
+DEFAULT_TO = os.environ.get("NUTRITION_REPORT_TO", "anurag@thekenkolife.com")
 
 OUT_CSV = HERE / "consultation_analysis.csv"
 
