@@ -94,8 +94,9 @@ def _find(remote_name):
     return files[0]["id"] if files else None
 
 
-def pull(out_dir):
-    """Download both caches from Drive into `out_dir`, overwriting local copies.
+def pull(out_dir, *names):
+    """Download the named caches from Drive into `out_dir` (default: both of
+    FILES), overwriting local copies.
 
     Call once at the very start of a run, BEFORE results.json is read for the
     skip-already-analyzed set. A missing remote file is normal (first run of a
@@ -111,7 +112,7 @@ def pull(out_dir):
         print(f"  [drive-cache] google client unavailable ({e}) — skipping pull.")
         return
 
-    for local in FILES:
+    for local in (names or FILES):
         remote = REMOTE_PREFIX + local
         try:
             fid = _find(remote)
