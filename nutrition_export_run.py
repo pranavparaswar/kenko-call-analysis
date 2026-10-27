@@ -120,10 +120,7 @@ Return ONLY the JSON object."""
     }, timeout=120)
     msg = r.json()["choices"][0].get("message", {})
     content = msg.get("content") or msg.get("reasoning_content") or ""
-    default = {k: "" for k in ce.EXTRACT_KEYS}
-    default["consultation_type"] = "consultation"
-    default["sentiment"] = "Neutral"
-    return pipeline._parse_json(content, default=default)
+    return pipeline._parse_json(content)
 
 
 def build_row(doc_id, info, z, tcache):
