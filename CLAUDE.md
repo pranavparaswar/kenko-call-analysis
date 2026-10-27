@@ -3,15 +3,31 @@
 Pulls recorded calls from Callyzer, transcribes them with Sarvam, classifies each
 call by type, scores it against a weighted checklist, and builds an HTML dashboard.
 
-## Analysis engine: Claude-ready, running on Sarvam until credits land
+## Analysis engine: running on Sarvam (Anthropic credits exhausted)
 
 Role classification (`_classify_role()`), full-call analysis (`analyze()`), and
 short-call drop-reason classification (`analyze_short_call()`) all go through
 one dispatcher, `_call_llm()`, which branches on `CONFIG["ANALYSIS_PROVIDER"]`
 ("sarvam" | "claude", default "sarvam" — override with the `ANALYSIS_PROVIDER`
-env var or edit `CONFIG` directly). **This is temporary** — running on Sarvam
-2026-10-17 only because Anthropic credits weren't available yet; flip the one
-config line the moment they land, no other code changes needed.
+env var or edit `CONFIG` directly).
+
+**Current state (2026-10-27): Sarvam.** The history is a round trip — Sarvam
+until 2026-10-17 because Anthropic credits weren't available, then Claude once
+they landed, and back to Sarvam on 2026-10-27 when those credits hit their
+limit. Flipping back to Claude is the same one-line change whenever credits
+exist again; nothing else in the pipeline cares.
+
+Pinned in three places, all of which must agree or the switch is only partial:
+local `.env` (`ANALYSIS_PROVIDER=sarvam`), the code default in `CONFIG`
+(already `sarvam`), and each cloud routine's command, which now passes
+`ANALYSIS_PROVIDER=sarvam` explicitly rather than trusting the cloud
+environment's own variable — that variable isn't readable from the CLI, so
+pinning it per-command is the only way to be certain a scheduled run can't
+quietly go back to Claude and fail on exhausted credits.
+
+Note the zip-export path (`consultation_export.py`, `nutrition_export_run.py`)
+calls `_post_sarvam_chat()` directly and has **always** been Sarvam-only — it
+never went through `_call_llm()`, so the provider switch does not affect it.
 
 - `"claude"` calls `_call_claude()` — Claude API (`CONFIG["CLAUDE_MODEL"]`,
   currently `claude-sonnet-5`) with `output_config.format`
