@@ -183,13 +183,22 @@ def download(service, file_id, dest):
 
 
 def upload_csv(service, folder_id, local_path, filename, share_with=()):
+    """Resumable + chunked: a non-resumable upload sends the whole CSV in one
+    HTTP request, which this sandbox's outbound proxy (it pauses/gates
+    uploads — see /root/.ccr/README.md) can cut mid-stream, failing with
+    SSLEOFError. Resumable upload retries the dropped chunk instead of
+    failing the whole transfer (observed twice in testing, same traceback)."""
     from googleapiclient.http import MediaFileUpload
 
-    media = MediaFileUpload(str(local_path), mimetype="text/csv", resumable=False)
-    f = service.files().create(
+    media = MediaFileUpload(str(local_path), mimetype="text/csv",
+                             resumable=True, chunksize=4 * 1024 * 1024)
+    request = service.files().create(
         body={"name": filename, "parents": [folder_id]},
         media_body=media, fields="id, webViewLink", supportsAllDrives=True,
-    ).execute()
+    )
+    f = None
+    while f is None:
+        _, f = request.next_chunk(num_retries=5)
     for email in share_with:
         if email:
             _share(service, f["id"], email)
