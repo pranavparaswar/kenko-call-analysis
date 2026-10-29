@@ -61,6 +61,21 @@ CC_LIST = [
 ]
 FAILURE_RECIPIENT = "pranav@thekenkolife.com"
 
+# Reps tagged role=sales in employees.csv who are deliberately NOT reported on.
+# Matched on the same lowercase first-word alias the rest of this file uses, so
+# "Sophiya Dash" in the CSV and "Sophiya" on a Callyzer call both resolve here.
+#
+# This suppresses the per-rep email AND the dashboard/PDF build -- the rep
+# simply isn't in the reported set, so management's CC carries nothing about
+# them either. It deliberately does NOT touch employees.csv: `role=` there is
+# what tells pipeline.py to score a call against the sales checklist rather
+# than the nutrition one, so dropping or retagging the row would quietly
+# change how the calls are analysed instead of just who hears about it. Their
+# calls are still fetched, transcribed, analysed and cached exactly as before.
+#
+# Sophiya excluded 2026-10-29 per Pranav. To resume, delete the entry.
+EXCLUDED_FROM_REPORTS = {"sophiya"}
+
 
 def load_sales_reps():
     """Read employees.csv -> list of sales reps: {name, alias, email}.
@@ -75,6 +90,10 @@ def load_sales_reps():
             role = (row.get("role") or "").strip().lower()
             name = (row.get("emp_name") or "").strip()
             if role != "sales" or not name:
+                continue
+            if name.split()[0].lower() in EXCLUDED_FROM_REPORTS:
+                print(f"  Skipping {name} — in EXCLUDED_FROM_REPORTS "
+                      f"(no report, no email; calls still analysed).")
                 continue
             reps.append({
                 "name": name.title(),
